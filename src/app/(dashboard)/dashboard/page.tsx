@@ -29,6 +29,13 @@ import {
  * Portfolio vitals from the MIS endpoint; project KPIs from the project data
  * context. Data is live from the API — no sample values remain.
  */
+
+const HEALTH_COLOR: Record<string, string> = {
+  green: 'var(--ok)',
+  amber: 'var(--warn)',
+  red: 'var(--danger)',
+};
+
 export default function DashboardPage() {
   const { user } = useSession();
   const { projects: PROJECTS, current, loading, error } = useProjectData();
@@ -63,6 +70,33 @@ export default function DashboardPage() {
     { value: healthSegments.amber ?? 0, color: 'var(--warn)', label: 'Amber' },
     { value: healthSegments.red ?? 0, color: 'var(--danger)', label: 'Red' },
   ].filter((s) => s.value > 0);
+
+  // Extra health content: RAG breakdown + KPI tiles (compact, fits same box).
+  const misRows: MisProjectRow[] = mis ? mis.rows : [];
+  const healthStats =
+    misRows.length > 0
+      ? (() => {
+        const total = misRows.length;
+
+        const ragRows = (['green', 'amber', 'red'] as const).map((k) => {
+          const count = misRows.filter((r) => r.health === k).length;
+          return {
+            key: k,
+            label: k.charAt(0).toUpperCase() + k.slice(1),
+            count,
+            pct: Math.round((count / total) * 100),
+            color: HEALTH_COLOR[k],
+          };
+        });
+
+        const avgSpi = misRows.reduce((s, r) => s + r.spi, 0) / total;
+        const avgCpi = misRows.reduce((s, r) => s + r.cpi, 0) / total;
+        const avgProgress = Math.round(misRows.reduce((s, r) => s + r.progress, 0) / total);
+        const overBudget = misRows.filter((r) => r.eac > r.budget).length;
+
+        return { ragRows, avgSpi, avgCpi, avgProgress, overBudget };
+      })()
+      : null;
 
   const eacBars = (mis ? [...mis.rows] : [])
     .sort((a, b) => b.eac - a.eac)
@@ -165,15 +199,102 @@ export default function DashboardPage() {
         <>
           <Grid cols={2}>
             <Panel title="Portfolio health" sub="RAG distribution" bodyless>
-              <div className="flex items-center justify-center p-5">
-                {donutSegments.length > 0 ? (
-                  <DonutChart
-                    segments={donutSegments}
-                    centreLabel={String(mis.totalProjects)}
-                    centreSub="projects"
-                    size={110}
-                    thickness={16}
-                  />
+              <div className="flex items-center gap-4 px-4 py-5 mt-4">
+                {donutSegments.length > 0 && healthStats ? (
+                  <>
+                    {/* Lock donut wrapper to exact ring size, kill hidden extra space */}
+                    <div
+                      className="shrink-0 overflow-visible"
+                      style={{ width: 150, height: 150, lineHeight: 0 }}
+                    >
+                      <DonutChart
+                        segments={donutSegments}
+                        centreLabel={String(mis.totalProjects)}
+                        centreSub="projects"
+                        size={150}
+                        thickness={22}
+                        fillCentre
+                      />
+                    </div>
+
+                    {/* Details, right */}
+                    <div className="flex min-w-0 flex-1 flex-col gap-16">
+                      {/* RAG bars */}
+                      <div className="flex flex-col gap-1">
+                        {healthStats.ragRows.map((g) => (
+                          <div key={g.key} className="flex items-center gap-2 text-[11px]">
+                            <span className="flex w-[48px] shrink-0 items-center gap-1.5 font-semibold">
+                              <i
+                                className="inline-block h-2 w-2 rounded-[2px]"
+                                style={{ background: g.color }}
+                              />
+                              {g.label}
+                            </span>
+                            <div
+                              className="h-[6px] min-w-0 flex-1 overflow-hidden rounded-full"
+                              style={{ background: 'var(--line-2)' }}
+                            >
+                              <div
+                                className="h-full rounded-full"
+                                style={{ width: `${g.pct}%`, background: g.color }}
+                              />
+                            </div>
+                            <span
+                              className="num w-[56px] shrink-0 whitespace-nowrap text-right"
+                              style={{ color: 'var(--muted)' }}
+                            >
+                              {g.count} · {g.pct}%
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Compact stat rows 2x2: label left, value right */}
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {[
+                          {
+                            label: 'Avg SPI',
+                            value: healthStats.avgSpi.toFixed(2),
+                            color: healthStats.avgSpi < 0.95 ? 'var(--danger)' : 'var(--ok)',
+                          },
+                          {
+                            label: 'Avg CPI',
+                            value: healthStats.avgCpi.toFixed(2),
+                            color: healthStats.avgCpi < 1 ? 'var(--warn)' : 'var(--ok)',
+                          },
+                          {
+                            label: 'Progress',
+                            value: `${healthStats.avgProgress}%`,
+                            color: undefined,
+                          },
+                          {
+                            label: 'Over budget',
+                            value: String(healthStats.overBudget),
+                            color: healthStats.overBudget > 0 ? 'var(--danger)' : 'var(--ok)',
+                          },
+                        ].map((t) => (
+                          <div
+                            key={t.label}
+                            className="flex items-center justify-between gap-2 rounded-md px-2 py-1"
+                            style={{ background: 'var(--panel-2)', border: '1px solid var(--line-2)' }}
+                          >
+                            <span
+                              className="whitespace-nowrap text-[9.5px] uppercase tracking-wide"
+                              style={{ color: 'var(--muted)' }}
+                            >
+                              {t.label}
+                            </span>
+                            <span
+                              className="num text-[13px] font-semibold leading-none"
+                              style={{ color: t.color }}
+                            >
+                              {t.value}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
                 ) : (
                   <p className="text-[12.5px]" style={{ color: 'var(--muted)' }}>No projects yet.</p>
                 )}
@@ -308,18 +429,18 @@ export default function DashboardPage() {
               items={
                 mis && mis.totalPendingApprovals > 0
                   ? mis.rows
-                      .filter((r) => r.pendingApprovals > 0)
-                      .map((r) => ({
-                        tone: 'warn' as const,
-                        text: (
-                          <span>
-                            <b>{r.name}</b> — {r.pendingApprovals} pending approval
-                            {r.pendingApprovals > 1 ? 's' : ''}
-                          </span>
-                        ),
-                        meta: `SPI ${r.spi.toFixed(2)} · CPI ${r.cpi.toFixed(2)}`,
-                        time: 'live',
-                      }))
+                    .filter((r) => r.pendingApprovals > 0)
+                    .map((r) => ({
+                      tone: 'warn' as const,
+                      text: (
+                        <span>
+                          <b>{r.name}</b> — {r.pendingApprovals} pending approval
+                          {r.pendingApprovals > 1 ? 's' : ''}
+                        </span>
+                      ),
+                      meta: `SPI ${r.spi.toFixed(2)} · CPI ${r.cpi.toFixed(2)}`,
+                      time: 'live',
+                    }))
                   : [{ tone: 'ok' as const, text: 'No pending approvals in your scope.', meta: 'All clear', time: '' }]
               }
             />

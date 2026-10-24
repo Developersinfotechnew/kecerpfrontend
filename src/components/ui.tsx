@@ -180,23 +180,34 @@ export function DonutChart({
   centreSub,
   size = 120,
   thickness = 16,
+  fillCentre,
 }: {
   segments: Array<{ value: number; color: string; label: string }>;
   centreLabel?: string;
   centreSub?: string;
   size?: number;
   thickness?: number;
+  /** Paint the inner disc with the dominant segment colour so the gauge reads as "filled". */
+  fillCentre?: boolean;
 }) {
   const total = segments.reduce((s, x) => s + x.value, 0) || 1;
   const r = (size - thickness) / 2;
+  const innerR = r - thickness / 2;
   const circumference = 2 * Math.PI * r;
   let offset = 0;
+
+  // Pick the dominant segment colour for the centre fill.
+  const dominant = segments.reduce((best, s) => (s.value > (best?.value ?? 0) ? s : best), segments[0]);
+  const centreFill = fillCentre ? (dominant?.color ?? 'var(--panel-2)') : 'var(--panel)';
 
   return (
     <div className="flex items-center gap-4">
       <div className="relative shrink-0" style={{ width: size, height: size }}>
         <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
+          {/* background ring */}
           <circle cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={thickness} style={{ stroke: 'var(--panel-2)' }} />
+          {/* centre disc — solid fill so the gauge doesn't look hollow */}
+          <circle cx={size / 2} cy={size / 2} r={innerR} fill={centreFill} opacity={fillCentre ? 0.15 : 0} />
           {segments.map((seg, i) => {
             const pct = seg.value / total;
             const dash = pct * circumference;
@@ -219,7 +230,9 @@ export function DonutChart({
           })}
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-          <span className="num text-[20px] font-semibold leading-none">{centreLabel ?? total}</span>
+          <span className="num text-[22px] font-semibold leading-none" style={{ color: fillCentre ? dominant?.color : 'inherit' }}>
+            {centreLabel ?? total}
+          </span>
           {centreSub ? <span className="mt-0.5 text-[10px]" style={{ color: 'var(--muted)' }}>{centreSub}</span> : null}
         </div>
       </div>

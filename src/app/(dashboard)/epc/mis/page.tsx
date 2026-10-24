@@ -182,6 +182,7 @@ export default function EpcMisPage() {
                 centreSub="projects"
                 size={130}
                 thickness={18}
+                fillCentre
               />
             ) : (
               <p className="text-[13px]" style={{ color: 'var(--muted)' }}>
