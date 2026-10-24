@@ -1,21 +1,27 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useParams } from 'next/navigation';
 
 import { Button, Chip, DataTable, Notice, PageHead, Panel } from '@/components/ui';
 import { RecordForm } from '@/components/RecordForm';
 import { useProjectData } from '@/lib/project-data';
+import { useSession } from '@/app/session';
 import { records, projects, type ProjectOption } from '@/lib/services';
 import type { RecordRow, RecordType } from '@/lib/types';
 
 /**
  * Generic register screen (client component).
  *
- * Receives `key` from the parent server component. All data fetching and
- * interactive render happen here. One component serves every register in the
- * app — the type definition drives the columns, filters and form.
+ * The register key is read from the URL via useParams(). This is the source of
+ * truth on the client side — it stays in sync with client-side navigation and
+ * never falls back to a prop that may be blank during a render transition.
  */
-export default function RegisterBody({ key }: { key: string }) {
+export default function RegisterBody() {
+  const params = useParams<{ key: string }>();
+  const key = params.key ?? '';
+
+  const { loading: sessionLoading } = useSession();
   const { current } = useProjectData();
 
   const [type, setType] = useState<RecordType | null>(null);
@@ -36,6 +42,8 @@ export default function RegisterBody({ key }: { key: string }) {
     setLoading(true);
     setError(null);
     try {
+      if (sessionLoading) return;
+      if (!key) return;
       const [typeRes, page] = await Promise.all([
         records.type(key),
         records.list(key, {
@@ -52,7 +60,7 @@ export default function RegisterBody({ key }: { key: string }) {
     } finally {
       setLoading(false);
     }
-  }, [key, search, projectId]);
+  }, [key, search, projectId, sessionLoading]);
 
   useEffect(() => {
     void load();
@@ -67,6 +75,10 @@ export default function RegisterBody({ key }: { key: string }) {
   }, [type]);
 
   const titleField = type?.titleField ?? '';
+
+  if (sessionLoading) {
+    return <Notice>Loading session…</Notice>;
+  }
 
   if (error && !type) {
     return <Notice>{error}</Notice>;

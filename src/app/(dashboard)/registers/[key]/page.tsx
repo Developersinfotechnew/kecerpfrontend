@@ -5,8 +5,8 @@ import RegisterBody from './RegisterBody';
 /**
  * Generic register screen — server wrapper.
  *
- * Awaits the async `params` (Next.js 15 pattern), then hands the `key` to the
- * client component which does all data fetching and rendering.
+ * Awaits the async `params` (Next.js 15 pattern) and returns notFound() for
+ * an empty key. The client child reads the key itself via useParams().
  */
 export default async function RegisterPage({
   params,
@@ -15,5 +15,5 @@ export default async function RegisterPage({
 }) {
   const { key } = await params;
   if (!key) notFound();
-  return <RegisterBody key={key} />;
+  return <RegisterBody />;
 }
