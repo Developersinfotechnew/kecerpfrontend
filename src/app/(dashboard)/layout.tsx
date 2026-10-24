@@ -21,7 +21,11 @@ import type { ProjectOption, NotificationItem } from '@/lib/services';
  * a module is a row in nav.seed.ts, never an edit here.
  */
 
+// Suites available in the sidebar. All six stay in SUITE_ORDER for
+// catalogue matching; DISABLED_SUITES is the gate that greys out pills
+// and hides their nav groups. Remove a key from this set to re-enable it.
 const SUITE_ORDER = ['backoffice', 'shared', 'epc', 'pmc', 'eptp', 'om'];
+const DISABLED_SUITES: ReadonlySet<string> = new Set(['pmc', 'eptp', 'om']);
 
 export default function DashboardLayout({
   children,
@@ -148,7 +152,16 @@ export default function DashboardLayout({
     [catalogue],
   );
 
-  const active = ordered.find((s) => s.suite === activeSuite) ?? ordered[0];
+  // If the active suite is disabled, fall back to the first enabled one so the
+  // nav groups render. A user deep-linked to a /om/... route still gets a
+  // working sidebar, just not the O&M pill.
+  const activeRaw = ordered.find((s) => s.suite === activeSuite) ?? ordered[0];
+  const active =
+    !activeRaw
+      ? undefined
+      : DISABLED_SUITES.has(activeRaw.suite)
+        ? ordered.find((s) => !DISABLED_SUITES.has(s.suite)) ?? activeRaw
+        : activeRaw;
 
   if (loading) {
     return (
@@ -268,17 +281,25 @@ export default function DashboardLayout({
           {ordered.map((s) => {
             const isActive = s.suite === activeSuite;
             const short = SUITE_LABELS[s.suite] ?? s.suite;
+            const disabled = DISABLED_SUITES.has(s.suite);
             return (
               <button
                 key={s.suite}
                 type="button"
-                onClick={() => setActiveSuite(s.suite)}
+                onClick={disabled ? undefined : () => setActiveSuite(s.suite)}
+                disabled={disabled}
                 aria-current={isActive ? 'page' : undefined}
+                title={disabled ? 'Coming soon' : undefined}
                 className="rounded-md px-2 py-2 text-center text-[11.5px] font-semibold leading-tight"
                 style={
                   isActive
                     ? { background: 'var(--accent)', color: '#fff' }
-                    : { background: 'var(--rail-2)', border: '1px solid var(--rail-line)', color: 'var(--rail-text)' }
+                    : {
+                        background: 'var(--rail-2)',
+                        border: '1px solid var(--rail-line)',
+                        color: 'var(--rail-text)',
+                        ...(disabled ? { cursor: 'not-allowed' } : {}),
+                      }
                 }
               >
                 {short}
