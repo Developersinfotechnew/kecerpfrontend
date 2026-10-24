@@ -314,10 +314,10 @@ export default function DashboardPage() {
 
           <div className="mt-[18px] grid gap-[18px] grid-cols-1 lg:grid-cols-2">
             <Panel title="Open items by project" sub="NCR · claims · approvals" bodyless>
-              <div className="p-4">
+              <div className="p-4 mt-2">
                 {openItemStacks.length > 0 ? (
                   <div>
-                    <div className="mb-3 flex flex-wrap gap-3 text-[11px]" style={{ color: 'var(--muted)' }}>
+                    <div className="mb-6 flex flex-wrap gap-6 text-[11px]" style={{ color: 'var(--muted)' }}>
                       <span className="flex items-center gap-1.5"><i className="inline-block h-2 w-2 rounded-[2px]" style={{ background: 'var(--danger)' }} /> NCR</span>
                       <span className="flex items-center gap-1.5"><i className="inline-block h-2 w-2 rounded-[2px]" style={{ background: 'var(--warn)' }} /> Claims</span>
                       <span className="flex items-center gap-1.5"><i className="inline-block h-2 w-2 rounded-[2px]" style={{ background: 'var(--accent)' }} /> Approvals</span>
@@ -331,17 +331,17 @@ export default function DashboardPage() {
             </Panel>
 
             <Panel title="Schedule index (SPI)" sub="Below 97% amber · below 90% red" bodyless>
-              <div className="flex flex-wrap items-start gap-4 p-4">
+              <div className="grid grid-cols-2 gap-3 p-3">
                 {mis.rows.filter((r) => r.status !== 'completed' && r.status !== 'closed').slice(0, 4).map((r) => (
                   <RadialGauge
                     key={r.projectId}
                     value={Math.round(r.spi * 100)}
-                    max={120}
+                    max={100}
                     label={r.name.slice(0, 16)}
                     unit="%"
                     tone={r.spi >= 0.97 ? 'ok' : r.spi >= 0.9 ? 'warn' : 'bad'}
-                    size={80}
-                    thickness={7}
+                    size={105}
+                    thickness={10}
                   />
                 ))}
                 {mis.rows.filter((r) => r.status !== 'completed' && r.status !== 'closed').length === 0
