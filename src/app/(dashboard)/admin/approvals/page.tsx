@@ -375,17 +375,17 @@ const LEVEL_LABELS: Record<AccessLevel, string> = {
  */
 const SERVICE_TABS = [
   { key: 'services', label: 'Services' },
-  { key: 'shared', label: 'Common' },
+  { key: 'shared', label: 'Head Office' },
   { key: 'epc', label: 'EPC' },
   { key: 'pmc', label: 'PMC' },
   { key: 'eptp', label: 'EPTP' },
   { key: 'om', label: 'O&M' },
-  { key: 'backoffice', label: 'Back Office' },
+  { key: 'backoffice', label: 'General' },
 ] as const;
 
 const SERVICE_OPTIONS = [
-  { key: 'shared', label: 'Common' },
-  { key: 'backoffice', label: 'Back Office' },
+  { key: 'shared', label: 'Head Office' },
+  { key: 'backoffice', label: 'General' },
   { key: 'epc', label: 'EPC' },
   { key: 'pmc', label: 'PMC' },
   { key: 'eptp', label: 'EPTP' },
@@ -426,7 +426,7 @@ function buildModuleGroups(
 /** Back-office modules that don't appear in the nav entries above. */
 const BACKOFFICE_MODULES: NavModuleGroup = {
   suite: 'backoffice',
-  group: 'Back Office',
+  group: 'General',
   modules: {
     lead: 'Leads',
     contract: 'Contracts',
@@ -664,7 +664,7 @@ function ModuleAccessDialog({
           variant="primary"
           onClick={() => {
             // If the admin set any module that lives in the 'shared' suite
-            // but did not explicitly tick 'Common' in the Services tab, add
+            // but did not explicitly tick 'Head Office' in the Services tab, add
             // 'shared' to the services list automatically.
             const SHARED_MODULES = new Set([
               'admin', 'project', 'workflow', 'hr', 'payroll',

@@ -32,8 +32,8 @@ export interface SuiteCatalogue {
  * so an unrecognised suite renders its code rather than crashing.
  */
 export const SUITE_LABELS: Partial<Record<string, string>> = {
-  backoffice: 'Back Office',
-  shared: 'Common',
+  backoffice: 'General',
+  shared: 'Head Office',
   epc: 'EPC',
   pmc: 'PMC',
   eptp: 'EPTP',

@@ -32,7 +32,7 @@ function fmtRole(role: string): string {
     commercialfinance: 'Commercial / Finance',
     compliance: 'Compliance',
     hr: 'HR',
-    backoffice: 'Back Office',
+    backoffice: 'General',
     developer: 'Developer',
   };
   return MAP[role] ?? role;

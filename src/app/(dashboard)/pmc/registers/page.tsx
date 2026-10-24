@@ -35,7 +35,7 @@ export default function RegistersIndexPage() {
   }, {});
 
   const suiteLabel: Record<string, string> = {
-    shared: 'Common',
+    shared: 'Head Office',
     epc: 'EPC',
     pmc: 'PMC',
     eptp: 'EPTP',
