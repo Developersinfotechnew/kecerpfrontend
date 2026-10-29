@@ -33,6 +33,7 @@ export default function AccessAdminPage() {
   const [roleForm, setRoleForm] = useState<RoleOption | 'new' | null>(null);
   const [navForm, setNavForm] = useState<NavEntryView | 'new' | null>(null);
   const [users, setUsers] = useState<UserOption[]>([]);
+  const [userForm, setUserForm] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -58,6 +59,17 @@ export default function AccessAdminPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  async function saveUser(body: {
+    name: string;
+    email: string;
+    password: string;
+    role: string;
+  }): Promise<void> {
+    await admin.createUser({ ...body, projectIds: [], clientIds: [] });
+    setUserForm(false);
+    void load();
+  }
 
   async function saveRole(body: RoleBody, assignToUsers?: string[]): Promise<void> {
     let newRoleName: string | undefined;
@@ -131,6 +143,9 @@ export default function AccessAdminPage() {
           <>
             {canCreate ? (
               <Button onClick={() => setNavForm('new')}>Add menu entry</Button>
+            ) : null}
+            {canCreate ? (
+              <Button onClick={() => setUserForm(true)}>Add user</Button>
             ) : null}
             {canCreate ? (
               <Button variant="primary" onClick={() => setRoleForm('new')}>
@@ -290,7 +305,146 @@ export default function AccessAdminPage() {
           onSubmit={saveNav}
         />
       ) : null}
+
+      {userForm ? (
+        <UserEditor
+          roles={roles}
+          canSave={canCreate}
+          onCancel={() => setUserForm(false)}
+          onSubmit={saveUser}
+        />
+      ) : null}
     </>
+  );
+}
+
+/**
+ * Add a user straight from the developer panel. The full user lifecycle
+ * (projects, clients, module access) lives on the Users screen; this is the
+ * fast path — name, email, password, role.
+ */
+function UserEditor({
+  roles,
+  canSave,
+  onCancel,
+  onSubmit,
+}: {
+  roles: RoleOption[];
+  canSave: boolean;
+  onCancel: () => void;
+  onSubmit: (body: { name: string; email: string; password: string; role: string }) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('Passw0rd!');
+  const [role, setRole] = useState('');
+
+  async function submit(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    setError(null);
+
+    if (!name.trim() || !email.trim() || !password || !role) {
+      setError('Name, email, password and role are all required.');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await onSubmit({
+        name: name.trim(),
+        email: email.trim(),
+        password,
+        role,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add user');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4"
+      style={{ background: 'rgba(15, 23, 42, 0.45)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Add user"
+      onClick={() => !busy && onCancel()}
+    >
+      <form
+        onSubmit={submit}
+        className="my-6 w-full max-w-md rounded"
+        style={{ background: 'var(--panel)', border: '1px solid var(--line)', padding: '18px' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="m-0 mb-4 text-[15px] font-semibold">Add user</h3>
+
+        {error ? (
+          <div className="mb-3">
+            <Notice>{error}</Notice>
+          </div>
+        ) : null}
+
+        <div className="grid gap-3">
+          <FieldRow label="Name" required>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={!canSave}
+              placeholder="Full name"
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)' }}
+            />
+          </FieldRow>
+          <FieldRow label="Email" hint="lowercase, login id" required>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value.toLowerCase())}
+              disabled={!canSave}
+              placeholder="user@kec.in"
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)' }}
+            />
+          </FieldRow>
+          <FieldRow label="Password" hint="Shared default until first login (CR-19 kept)" required>
+            <input
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              disabled={!canSave}
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)' }}
+            />
+          </FieldRow>
+          <FieldRow label="Role" required>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              disabled={!canSave}
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)', background: '#fff' }}
+            >
+              <option value="">Pick a role</option>
+              {roles.map((r) => (
+                <option key={r.name} value={r.name}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          </FieldRow>
+        </div>
+
+        <div className="mt-4 flex justify-end gap-2">
+          <Button onClick={onCancel}>Cancel</Button>
+          <Button type="submit" variant="primary" disabled={!canSave || busy}>
+            {busy ? 'Creating…' : 'Create user'}
+          </Button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -321,6 +475,7 @@ function RoleEditor({
   const [selected, setSelected] = useState<string[]>(role?.permissions ?? []);
   const [scopeAll, setScopeAll] = useState(role?.projectScopeAll ?? false);
   const [assignedUsers, setAssignedUsers] = useState<Set<string>>(new Set());
+  const [allSelected, setAllSelected] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -335,8 +490,14 @@ function RoleEditor({
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      setAllSelected(users.length > 0 && next.size === users.length);
       return next;
     });
+  }
+
+  function toggleAllUsers(checked: boolean): void {
+    setAssignedUsers(checked ? new Set(users.map((u) => u.id)) : new Set());
+    setAllSelected(checked);
   }
 
   async function submit(): Promise<void> {
@@ -366,12 +527,12 @@ function RoleEditor({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4"
       style={{ background: 'rgba(15, 23, 42, 0.45)' }}
       onClick={() => !busy && onCancel()}
     >
       <div
-        className="w-full max-w-2xl rounded"
+        className="my-6 w-full max-w-2xl rounded"
         style={{ background: 'var(--panel)', border: '1px solid var(--line)', padding: '18px' }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -470,26 +631,40 @@ function RoleEditor({
                     No users yet. Create accounts from the developer panel first.
                   </p>
                 ) : (
-                  users.map((u) => (
+                  <>
                     <label
-                      key={u.id}
-                      className="flex items-center gap-2 rounded px-2 py-1 text-[12.5px]"
-                      style={{
-                        background: assignedUsers.has(u.id) ? 'var(--accent-soft, #eef5f2)' : undefined,
-                      }}
+                      className="mb-1 flex items-center gap-2 rounded px-2 py-1 text-[12.5px] font-medium"
+                      style={{ color: 'var(--ink)' }}
                     >
                       <input
                         type="checkbox"
-                        checked={assignedUsers.has(u.id)}
-                        onChange={() => toggleUser(u.id)}
+                        checked={allSelected}
+                        onChange={(e) => toggleAllUsers(e.target.checked)}
                         disabled={!canSave}
                       />
-                      <span className="font-medium">{u.name}</span>
-                      <span className="num text-[11.5px]" style={{ color: 'var(--muted)' }}>
-                        {u.email}
-                      </span>
+                      Select all {users.length} users
                     </label>
-                  ))
+                    {users.map((u) => (
+                      <label
+                        key={u.id}
+                        className="flex items-center gap-2 rounded px-2 py-1 text-[12.5px]"
+                        style={{
+                          background: assignedUsers.has(u.id) ? 'var(--accent-soft, #eef5f2)' : undefined,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={assignedUsers.has(u.id)}
+                          onChange={() => toggleUser(u.id)}
+                          disabled={!canSave}
+                        />
+                        <span className="font-medium">{u.name}</span>
+                        <span className="num text-[11.5px]" style={{ color: 'var(--muted)' }}>
+                          {u.email}
+                        </span>
+                      </label>
+                    ))}
+                  </>
                 )}
               </div>
             </FieldRow>
@@ -557,12 +732,12 @@ function NavEntryEditor({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4"
       style={{ background: 'rgba(15, 23, 42, 0.45)' }}
       onClick={() => !busy && onCancel()}
     >
       <div
-        className="w-full max-w-xl rounded"
+        className="my-6 w-full max-w-xl rounded"
         style={{ background: 'var(--panel)', border: '1px solid var(--line)', padding: '18px' }}
         onClick={(e) => e.stopPropagation()}
       >

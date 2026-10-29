@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { admin, projects } from '@/lib/services';
-import type { ProjectOption, ProjectTeamMember, UserOption } from '@/lib/services';
+import type { ProjectOption, ProjectTeamMember, RoleOption, UserOption } from '@/lib/services';
 import { useSession } from '@/app/session';
 import { Button, Chip, DataTable, Notice, PageHead, Panel } from '@/components/ui';
 
@@ -23,20 +23,29 @@ export default function ProjectTeamsPage() {
   const [users, setUsers] = useState<UserOption[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [team, setTeam] = useState<ProjectTeamMember[]>([]);
+  const [roles, setRoles] = useState<RoleOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // Add-to-team form.
   const [pickUser, setPickUser] = useState('');
-  const [pickRole, setPickRole] = useState('procurement');
+  const [pickRole, setPickRole] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [p, u] = await Promise.all([projects.list({ kind: 'master' }), admin.users()]);
+      const [p, u, r] = await Promise.all([
+        projects.list({ kind: 'master' }),
+        admin.users(),
+        admin.roles(),
+      ]);
       setProjectsList(p);
       setUsers(u);
+      setRoles(r);
+      // Default the role picker to the first role, but never reset a choice
+      // the admin already made.
+      setPickRole((cur) => (cur || (r[0]?.name ?? '')));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load');
     } finally {
@@ -153,21 +162,12 @@ export default function ProjectTeamsPage() {
                   className="rounded px-2 py-1.5 text-[12.5px]"
                   style={{ border: '1px solid var(--line)', background: 'var(--panel)', minWidth: '180px' }}
                 >
-                  {[
-                    ['procurement', 'Procurement'],
-                    ['projectmanager', 'Project Manager'],
-                    ['commercialfinance', 'Commercial / Finance'],
-                    ['siteengineer', 'Site Engineer'],
-                    ['storekeeper', 'Store Keeper'],
-                    ['pmcdirector', 'PM / Director'],
-                    ['compliance', 'Compliance'],
-                    ['ceo', 'CEO'],
-                  ].map(([v, l]) => (
-                    <option key={v} value={v}>{l}</option>
+                  {roles.map((r) => (
+                    <option key={r.name} value={r.name}>{r.label}</option>
                   ))}
                 </select>
               </div>
-              <Button variant="primary" onClick={() => void addMember()} disabled={!pickUser}>
+              <Button variant="primary" onClick={() => void addMember()} disabled={!pickUser || !pickRole}>
                 Add to team
               </Button>
             </div>

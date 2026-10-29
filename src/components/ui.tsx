@@ -454,7 +454,7 @@ export function RadialGauge({
   const color = colorMap[tone] ?? colorMap.ok;
 
   return (
-    <div className="flex flex-col items-center gap-1">
+    <div className="flex flex-col items-center gap-1 rounded-md px-3 py-2" style={{ background: 'var(--panel-2)' }}>
       <div className="relative" style={{ width: size, height: size / 2 + thickness }}>
         <svg
           width={size}

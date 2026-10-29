@@ -24,11 +24,18 @@ interface RecordFormProps {
   type: RecordType;
   /** null creates a new record; a row edits it. */
   record: RecordRow | null;
+  /**
+   * CR-11: field values to open a create with. The DPR prefill endpoint
+   * returns the day's DSR numbers; passing them here means the PM confirms a
+   * filled form instead of typing from scratch. Only used when record is
+   * null, on top of each field's declared default.
+   */
+  initialValues?: Record<string, unknown>;
   onCancel: () => void;
   onSubmit: (body: Record<string, unknown>) => Promise<void>;
 }
 
-export function RecordForm({ type, record, onCancel, onSubmit }: RecordFormProps) {
+export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: RecordFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [projectId, setProjectId] = useState<string>('');
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
@@ -62,6 +69,13 @@ export function RecordForm({ type, record, onCancel, onSubmit }: RecordFormProps
       const initial: Record<string, unknown> = {};
       for (const f of fields) {
         if (f.defaultValue) initial[f.key] = f.defaultValue;
+      }
+      // CR-11: a create opened with prefilled values (the DPR screen) layers
+      // them over the defaults, so the PM starts from the day's site data.
+      if (initialValues) {
+        for (const [k, v] of Object.entries(initialValues)) {
+          if (v !== undefined && v !== null) initial[k] = v;
+        }
       }
       setValues(initial);
       setProjectId('');
@@ -349,6 +363,15 @@ function Input({ field, value, onChange, pending, uploading, onPick, onClear }: 
         />
       );
 
+    case 'table':
+      return (
+        <TableInput
+          columns={field.tableColumns ?? []}
+          value={Array.isArray(value) ? (value as Array<Record<string, unknown>>) : []}
+          onChange={(rows) => onChange(rows)}
+        />
+      );
+
     case 'file':
       return (
         <FileInput
@@ -458,6 +481,130 @@ function FileInput({
       className="block w-full text-[12.5px]"
       style={{ color: 'var(--muted)' }}
     />
+  );
+}
+
+/**
+ * CR-11: an inline table field. One row is an object whose keys are the
+ * field's declared columns. The editor renders a grid with a column header
+ * per key; each cell is a free input so the same editor serves any table
+ * (activities done, hindrances, or a future one). The value is an array of
+ * row objects; add and remove rows in place.
+ */
+function TableInput({
+  columns,
+  value,
+  onChange,
+}: {
+  columns: string[];
+  value: Array<Record<string, unknown>>;
+  onChange: (rows: Array<Record<string, unknown>>) => void;
+}) {
+  if (columns.length === 0) {
+    return (
+      <p className="m-0 text-[12px]" style={{ color: 'var(--faint)' }}>
+        No columns declared for this table.
+      </p>
+    );
+  }
+
+  function setCell(rowIdx: number, col: string, cell: string): void {
+    onChange(value.map((r, i) => (i === rowIdx ? { ...r, [col]: cell } : r)));
+  }
+
+  function addRow(): void {
+    const blank: Record<string, unknown> = {};
+    for (const c of columns) blank[c] = '';
+    onChange([...value, blank]);
+  }
+
+  function removeRow(rowIdx: number): void {
+    onChange(value.filter((_, i) => i !== rowIdx));
+  }
+
+  return (
+    <div>
+      <div className="grid gap-1.5" style={{ gridTemplateColumns: `48px ${columns.map(() => '1fr').join(' ')} 32px` }}>
+        <div />
+        {columns.map((c) => (
+          <span
+            key={`h-${c}`}
+            className="text-[10.5px] font-semibold uppercase tracking-wide"
+            style={{ color: 'var(--muted)' }}
+          >
+            {c.replace(/([A-Z])/g, ' $1').toLowerCase()}
+          </span>
+        ))}
+        <span />
+
+        {value.map((row, rowIdx) => (
+          <TableRow
+            key={rowIdx}
+            index={rowIdx + 1}
+            row={row}
+            columns={columns}
+            onCell={(c, v) => setCell(rowIdx, c, v)}
+            onRemove={() => removeRow(rowIdx)}
+          />
+        ))}
+
+        <div className="col-span-full">
+          <button
+            type="button"
+            onClick={addRow}
+            className="rounded px-2.5 py-1 text-[12px] font-medium"
+            style={{ border: '1px solid var(--line)', background: 'var(--panel-2)', color: 'var(--ink)' }}
+          >
+            + Add row
+          </button>
+        </div>
+      </div>
+      {value.length === 0 ? (
+        <p className="mt-1.5 m-0 text-[11.5px]" style={{ color: 'var(--faint)' }}>
+          No rows yet.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function TableRow({
+  index,
+  row,
+  columns,
+  onCell,
+  onRemove,
+}: {
+  index: number;
+  row: Record<string, unknown>;
+  columns: string[];
+  onCell: (col: string, v: string) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <>
+      <span className="num text-[11.5px]" style={{ color: 'var(--faint)', paddingTop: '4px' }}>
+        {index}
+      </span>
+      {columns.map((c) => (
+        <input
+          key={c}
+          value={row[c] === undefined || row[c] === null ? '' : String(row[c])}
+          onChange={(e) => onCell(c, e.target.value)}
+          className="rounded px-1.5 py-1 text-[12px]"
+          style={{ border: '1px solid var(--line)', background: 'var(--panel)' }}
+        />
+      ))}
+      <button
+        type="button"
+        onClick={onRemove}
+        className="text-[14px] leading-none"
+        style={{ color: 'var(--muted)' }}
+        aria-label="Remove row"
+      >
+        ×
+      </button>
+    </>
   );
 }
 

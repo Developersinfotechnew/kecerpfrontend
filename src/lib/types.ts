@@ -55,7 +55,8 @@ export type FieldType =
   | 'status'
   | 'ref'
   | 'boolean'
-  | 'file';
+  | 'file'
+  | 'table';
 
 /**
  * The value of a `file` field, stored on the record.
@@ -84,6 +85,8 @@ export interface RecordField {
   listColumn: boolean;
   defaultValue: string;
   sortOrder: number;
+  /** CR-11: row keys for a table field. Absent for every other type. */
+  tableColumns?: string[];
 }
 
 export interface RecordType {

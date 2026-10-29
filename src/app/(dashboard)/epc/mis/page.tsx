@@ -85,13 +85,20 @@ export default function EpcMisPage() {
   const stackedRows = useMemo(() => {
     if (!mis) return [];
     return mis.rows
-      .filter((r) => r.openNcrs > 0 || r.openClaims > 0 || r.pendingApprovals > 0)
+      .filter(
+        (r) =>
+          r.openNcrs > 0 ||
+          r.openClaims > 0 ||
+          r.pendingApprovals > 0 ||
+          r.pendingClientApprovals > 0,
+      )
       .map((r) => ({
         label: r.name,
         segments: [
           { value: r.openNcrs, color: 'var(--danger)', label: `Open NCRs: ${r.openNcrs}` },
           { value: r.openClaims, color: 'var(--warn)', label: `Open claims: ${r.openClaims}` },
           { value: r.pendingApprovals, color: 'var(--accent)', label: `Pending approvals: ${r.pendingApprovals}` },
+          { value: r.pendingClientApprovals, color: 'var(--ok)', label: `Client approvals: ${r.pendingClientApprovals}` },
         ],
       }));
   }, [mis]);
@@ -336,13 +343,90 @@ export default function EpcMisPage() {
             columns={[
               { key: 'project', label: 'Project' },
               { key: 'pending', label: 'Pending', align: 'right' },
-              { key: 'oldest', label: 'Oldest open since' },
             ]}
             rows={mis.rows.filter((r) => r.pendingApprovals > 0).map((r) => [
               <span key="n" className="font-semibold">{r.name}</span>,
               <span key="p" className="num">{r.pendingApprovals}</span>,
-              <span key="o" style={{ color: 'var(--muted)' }}>—</span>,
             ])}
+          />
+        )}
+      </Panel>
+
+      <Panel
+        title="Client approvals pending"
+        sub="Items waiting on the client · max ageing in days"
+        bodyless
+      >
+        {mis.rows.filter((r) => r.pendingClientApprovals > 0).length === 0 ? (
+          <p className="m-0 p-4 text-[13px]" style={{ color: 'var(--muted)' }}>
+            No items pending with the client.
+          </p>
+        ) : (
+          <DataTable
+            columns={[
+              { key: 'project', label: 'Project' },
+              { key: 'pending', label: 'Pending', align: 'right' },
+              { key: 'age', label: 'Max ageing', align: 'right' },
+            ]}
+            rows={mis.rows
+              .filter((r) => r.pendingClientApprovals > 0)
+              .sort((a, b) => b.clientApprovalAgeDays - a.clientApprovalAgeDays)
+              .map((r) => [
+                <span key="n" className="font-semibold">{r.name}</span>,
+                <span key="p" className="num">{r.pendingClientApprovals}</span>,
+                <span
+                  key="a"
+                  className="num"
+                  style={{
+                    color:
+                      r.clientApprovalAgeDays >= 14
+                        ? 'var(--red)'
+                        : r.clientApprovalAgeDays >= 7
+                          ? 'var(--amber)'
+                          : undefined,
+                  }}
+                >
+                  {r.clientApprovalAgeDays}d
+                </span>,
+              ])}
+          />
+        )}
+      </Panel>
+
+      <Panel
+        title="Daily progress report compliance"
+        sub="Month to date · CR-13 cut-off rule"
+        bodyless
+      >
+        {mis.rows.length === 0 ? (
+          <p className="m-0 p-4 text-[13px]" style={{ color: 'var(--muted)' }}>
+            No projects in scope.
+          </p>
+        ) : (
+          <DataTable
+            columns={[
+              { key: 'project', label: 'Project' },
+              { key: 'compliance', label: 'DPR compliance', align: 'right' },
+            ]}
+            rows={mis.rows
+              .slice()
+              .sort((a, b) => (a.dprCompliance ?? 100) - (b.dprCompliance ?? 100))
+              .map((r) => {
+                const v = r.dprCompliance ?? 100;
+                return [
+                  <span key="n" className="font-semibold">{r.name}</span>,
+                  <span
+                    key="c"
+                    className="num"
+                    style={{
+                      color:
+                        v < 70 ? 'var(--red)' : v < 95 ? 'var(--amber, #b45309)' : 'var(--ok)',
+                    }}
+                  >
+                    {v}%
+                  </span>,
+                ];
+              })}
           />
         )}
       </Panel>

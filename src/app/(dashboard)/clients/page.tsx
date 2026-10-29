@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { admin } from '@/lib/services';
-import type { ClientEntity, ServiceLine } from '@/lib/services';
+import type { ClientContact, ClientEntity, ServiceLine } from '@/lib/services';
 import { useSession } from '../../session';
 import { Button, DataTable, Notice, PageHead, Panel, RoleLetter, VitalsRail } from '@/components/ui';
 
@@ -181,6 +181,32 @@ export default function ClientsPage() {
                 </div>
               ) : null}
 
+              {c.contacts && c.contacts.length > 0 ? (
+                <div className="mt-2.5 grid gap-1.5">
+                  {c.contacts.map((ct, i) => (
+                    <div
+                      key={i}
+                      className="rounded px-2.5 py-1.5 text-[11.5px]"
+                      style={{ background: 'var(--panel-2)', color: 'var(--text)' }}
+                    >
+                      <span className="font-medium">{ct.name}</span>
+                      {ct.designation ? <span style={{ color: 'var(--muted)' }}> · {ct.designation}</span> : null}
+                      <span
+                        className="ml-1.5 rounded-full px-1.5 py-[1px] text-[10px] font-semibold"
+                        style={{ background: 'var(--accent-soft)', color: 'var(--accent-dark)' }}
+                      >
+                        {ct.approverLevel}
+                      </span>
+                      {(ct.email || ct.mobile) ? (
+                        <div style={{ color: 'var(--muted)' }}>
+                          {ct.email}{ct.email && ct.mobile ? ' · ' : ''}{ct.mobile}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
               {can('project:create') ? (
                 <div className="mt-3 flex gap-2 border-t pt-3" style={{ borderColor: 'var(--line-2)' }}>
                   <Button variant="small" onClick={() => setEditing(c)}>
@@ -242,6 +268,7 @@ interface ClientFormProps {
     code?: string;
     plant?: string;
     services?: ServiceLine[];
+    contacts?: ClientContact[];
     contactName?: string;
     contactEmail?: string;
     contactPhone?: string;
@@ -267,6 +294,26 @@ function ClientForm({ client, onCancel, onSubmit }: ClientFormProps) {
   const [plant, setPlant] = useState(client?.plant ?? '');
   const [contactName, setContactName] = useState(client?.contactName ?? '');
   const [contactPhone, setContactPhone] = useState(client?.contactPhone ?? '');
+  const [contacts, setContacts] = useState<ClientContact[]>(client?.contacts ?? []);
+
+  function updateContact(i: number, key: keyof ClientContact, value: string): void {
+    setContacts((prev) =>
+      prev.map((c, idx) =>
+        idx === i ? ({ ...c, [key]: value } as unknown as ClientContact) : c,
+      ),
+    );
+  }
+
+  function addContact(): void {
+    setContacts((prev) => [
+      ...prev,
+      { name: '', designation: '', email: '', mobile: '', approverLevel: 'Engineer' },
+    ]);
+  }
+
+  function removeContact(i: number): void {
+    setContacts((prev) => prev.filter((_, idx) => idx !== i));
+  }
   const [services, setServices] = useState<Set<ServiceLine>>(
     new Set(client ? client.services : ['epc']),
   );
@@ -302,6 +349,13 @@ function ClientForm({ client, onCancel, onSubmit }: ClientFormProps) {
         plant: plant.trim() || undefined,
         contactName: contactName.trim() || undefined,
         contactPhone: contactPhone.trim() || undefined,
+        contacts: contacts.filter((c) => c.name.trim()).map((c) => ({
+          name: c.name.trim(),
+          designation: c.designation.trim(),
+          email: c.email.trim(),
+          mobile: c.mobile.trim(),
+          approverLevel: c.approverLevel,
+        })),
         services: [...services],
       });
     } catch (err) {
@@ -410,6 +464,88 @@ function ClientForm({ client, onCancel, onSubmit }: ClientFormProps) {
                 style={{ border: '1px solid var(--line)', background: '#fff' }}
               />
             </label>
+          </div>
+
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-[12.5px] font-medium">Client contacts</span>
+              <button
+                type="button"
+                onClick={addContact}
+                className="rounded px-2 py-[3px] text-[12px] font-medium"
+                style={{ color: 'var(--accent-dark)', background: 'var(--accent-soft)' }}
+              >
+                + Add contact
+              </button>
+            </div>
+            <p className="mb-2 mt-0 text-[12px]" style={{ color: 'var(--muted)' }}>
+              Named users with designation and approver level (Client Engineer or Client Management).
+            </p>
+            {contacts.length === 0 ? (
+              <p className="mb-0 text-[12px]" style={{ color: 'var(--faint)' }}>
+                No contacts yet.
+              </p>
+            ) : (
+              <div className="grid gap-2">
+                {contacts.map((c, i) => (
+                  <div
+                    key={i}
+                    className="grid gap-2 rounded p-2.5 sm:grid-cols-2"
+                    style={{ border: '1px solid var(--line)', background: '#fff' }}
+                  >
+                    <input
+                      value={c.name}
+                      onChange={(e) => updateContact(i, 'name', e.target.value)}
+                      className="w-full rounded px-2 py-1 text-[12.5px]"
+                      style={{ border: '1px solid var(--line-2)', background: 'var(--panel)' }}
+                      placeholder="Full name *"
+                    />
+                    <input
+                      value={c.designation}
+                      onChange={(e) => updateContact(i, 'designation', e.target.value)}
+                      className="w-full rounded px-2 py-1 text-[12.5px]"
+                      style={{ border: '1px solid var(--line-2)', background: 'var(--panel)' }}
+                      placeholder="Designation"
+                    />
+                    <input
+                      value={c.email}
+                      onChange={(e) => updateContact(i, 'email', e.target.value)}
+                      className="w-full rounded px-2 py-1 text-[12.5px]"
+                      style={{ border: '1px solid var(--line-2)', background: 'var(--panel)' }}
+                      placeholder="Email"
+                    />
+                    <div className="flex gap-2">
+                      <input
+                        value={c.mobile}
+                        onChange={(e) => updateContact(i, 'mobile', e.target.value)}
+                        className="num w-full rounded px-2 py-1 text-[12.5px]"
+                        style={{ border: '1px solid var(--line-2)', background: 'var(--panel)' }}
+                        placeholder="Mobile"
+                      />
+                      <select
+                        value={c.approverLevel}
+                        onChange={(e) => updateContact(i, 'approverLevel', e.target.value)}
+                        className="w-[130px] rounded px-1.5 py-1 text-[12.5px]"
+                        style={{ border: '1px solid var(--line-2)', background: 'var(--panel)' }}
+                      >
+                        <option value="Engineer">Engineer</option>
+                        <option value="Management">Management</option>
+                        <option value="Other">Other</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => removeContact(i)}
+                        className="px-1 text-[14px]"
+                        style={{ color: 'var(--faint)' }}
+                        aria-label="Remove contact"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div>

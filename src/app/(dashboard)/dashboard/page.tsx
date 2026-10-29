@@ -107,15 +107,29 @@ export default function DashboardPage() {
     }));
 
   const openItemStacks = (mis ? mis.rows : [])
-    .filter((r) => r.openNcrs > 0 || r.openClaims > 0 || r.pendingApprovals > 0)
+    .filter(
+      (r) =>
+        r.openNcrs > 0 ||
+        r.openClaims > 0 ||
+        r.pendingApprovals > 0 ||
+        r.pendingClientApprovals > 0,
+    )
     .map((r) => ({
       label: r.name,
       segments: [
         { value: r.openNcrs, color: 'var(--danger)', label: `NCR ${r.openNcrs}` },
         { value: r.openClaims, color: 'var(--warn)', label: `Claims ${r.openClaims}` },
         { value: r.pendingApprovals, color: 'var(--accent)', label: `Approvals ${r.pendingApprovals}` },
+        { value: r.pendingClientApprovals, color: 'var(--ok)', label: `Client ${r.pendingClientApprovals}` },
       ],
     }));
+
+  /** CR-08: projects with items waiting on the client, oldest ageing first. */
+  const clientPendingRows = mis
+    ? mis.rows
+        .filter((r) => r.pendingClientApprovals > 0)
+        .sort((a, b) => b.clientApprovalAgeDays - a.clientApprovalAgeDays)
+    : [];
 
   const p = current;
   const activeProjects = PROJECTS.filter((x) => x.status === 'Active').length;
@@ -321,6 +335,7 @@ export default function DashboardPage() {
                       <span className="flex items-center gap-1.5"><i className="inline-block h-2 w-2 rounded-[2px]" style={{ background: 'var(--danger)' }} /> NCR</span>
                       <span className="flex items-center gap-1.5"><i className="inline-block h-2 w-2 rounded-[2px]" style={{ background: 'var(--warn)' }} /> Claims</span>
                       <span className="flex items-center gap-1.5"><i className="inline-block h-2 w-2 rounded-[2px]" style={{ background: 'var(--accent)' }} /> Approvals</span>
+                      <span className="flex items-center gap-1.5"><i className="inline-block h-2 w-2 rounded-[2px]" style={{ background: 'var(--ok)' }} /> Client</span>
                     </div>
                     <StackedBar rows={openItemStacks} />
                   </div>
@@ -329,6 +344,41 @@ export default function DashboardPage() {
                 )}
               </div>
             </Panel>
+
+            {clientPendingRows.length > 0 ? (
+              <Panel title="Client approvals pending" sub="Waiting on client · max ageing" bodyless>
+                <div className="p-4 mt-2">
+                  {clientPendingRows.map((r) => (
+                    <div
+                      key={r.projectId}
+                      className="flex items-center justify-between border-b py-1.5 last:border-0"
+                      style={{ borderColor: 'var(--line-2)' }}
+                    >
+                      <div className="text-[12.5px]" style={{ color: 'var(--ink)' }}>
+                        <b>{r.name}</b>
+                        <span style={{ color: 'var(--muted)' }}>
+                          {' '}· {r.pendingClientApprovals} item
+                          {r.pendingClientApprovals > 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      <span
+                        className="num text-[11.5px]"
+                        style={{
+                          color:
+                            r.clientApprovalAgeDays >= 14
+                              ? 'var(--red)'
+                              : r.clientApprovalAgeDays >= 7
+                                ? 'var(--amber)'
+                                : 'var(--muted)',
+                        }}
+                      >
+                        {r.clientApprovalAgeDays}d
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            ) : null}
 
             <Panel title="Schedule index (SPI)" sub="Below 97% amber · below 90% red" bodyless>
               <div className="grid grid-cols-2 gap-3 p-3">

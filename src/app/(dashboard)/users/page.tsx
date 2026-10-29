@@ -45,6 +45,9 @@ export default function UsersPage() {
   const [rejectReason, setRejectReason] = useState('');
   const [accessEditing, setAccessEditing] = useState<UserRow | null>(null);
   const [accessDraft, setAccessDraft] = useState<Record<string, 'view' | 'add' | 'edit' | 'full'>>({});
+  const [projectEditing, setProjectEditing] = useState<UserRow | null>(null);
+  const [projectDraft, setProjectDraft] = useState<Set<string>>(new Set());
+  const [projectBusy, setProjectBusy] = useState(false);
   const [clients, setClients] = useState<ClientEntity[]>([]);
   const canApprove = can('admin:approve');
 
@@ -85,6 +88,32 @@ export default function UsersPage() {
   function openAccessEditor(row: UserRow): void {
     setAccessEditing(row);
     setAccessDraft(row.moduleAccess ?? {});
+  }
+
+  function openProjectEditor(row: UserRow): void {
+    setProjectEditing(row);
+    setProjectDraft(new Set(row.projectScopeAll ? [] : row.projectIds));
+  }
+
+  async function saveProjectEditor(): Promise<void> {
+    if (!projectEditing) return;
+    setProjectBusy(true);
+    setError(null);
+    try {
+      await admin.updateUser(projectEditing.id, { projectIds: [...projectDraft] });
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === projectEditing.id
+            ? { ...r, projectIds: [...projectDraft] }
+            : r,
+        ),
+      );
+      setProjectEditing(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save project assignment');
+    } finally {
+      setProjectBusy(false);
+    }
   }
 
   async function saveAccessEditor(): Promise<void> {
@@ -197,6 +226,25 @@ export default function UsersPage() {
           setDraft={setAccessDraft}
           onCancel={() => setAccessEditing(null)}
           onSubmit={() => void saveAccessEditor()}
+        />
+      ) : null}
+
+      {projectEditing ? (
+        <ProjectAssignDialog
+          user={projectEditing}
+          projects={projects}
+          selected={projectDraft}
+          busy={projectBusy}
+          onToggle={(id) =>
+            setProjectDraft((prev) => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            })
+          }
+          onCancel={() => setProjectEditing(null)}
+          onSubmit={() => void saveProjectEditor()}
         />
       ) : null}
 
@@ -317,6 +365,16 @@ export default function UsersPage() {
                     {row.isActive ? 'Active' : 'Disabled'}
                   </Chip>
                 )}
+                {canApprove ? (
+                  <button
+                    onClick={() => openProjectEditor(row)}
+                    className="text-[11.5px] font-medium"
+                    style={{ color: 'var(--blue)', cursor: 'pointer', background: 'none', border: 'none', padding: 0 }}
+                    title="Assign projects"
+                  >
+                    projects
+                  </button>
+                ) : null}
                 {canApprove ? (
                   <button
                     onClick={() => openAccessEditor(row)}
@@ -636,6 +694,114 @@ function RejectDialog({ user, reason, setReason, onCancel, onSubmit }: RejectDia
           <Button variant="primary" disabled={!reason.trim()} onClick={onSubmit}>
             Reject
           </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface ProjectAssignDialogProps {
+  user: UserRow;
+  projects: { id: string; code: string; name: string; kind: string; stage: string | null }[];
+  selected: Set<string>;
+  busy: boolean;
+  onToggle: (id: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+}
+
+/**
+ * Assign which projects a user can see. This is the whole scope decision:
+ * `projectIds` on the user drives every list, dropdown and dashboard for that
+ * login. A client engineer on one plant sees exactly that plant; a user on two
+ * sees both. The role sets what they may do, this sets where.
+ */
+function ProjectAssignDialog({
+  user,
+  projects,
+  selected,
+  busy,
+  onToggle,
+  onCancel,
+  onSubmit,
+}: ProjectAssignDialogProps) {
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center p-4"
+      style={{ background: 'rgba(15, 23, 41, 0.45)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Assign projects to ${user.name}`}
+    >
+      <div
+        className="w-full max-w-md rounded"
+        style={{ background: 'var(--panel)', border: '1px solid var(--line)' }}
+      >
+        <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid var(--line-2)' }}>
+          <div>
+            <h3 className="m-0 text-[14px] font-semibold">Project scope · {user.name}</h3>
+            <p className="m-0 mt-0.5 text-[11.5px]" style={{ color: 'var(--muted)' }}>
+              This user sees only the projects ticked here, in every screen.
+            </p>
+          </div>
+          <button
+            onClick={onCancel}
+            className="text-[18px] leading-none"
+            style={{ color: 'var(--muted)' }}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="p-4">
+          {projects.length === 0 ? (
+            <p className="m-0 text-[12.5px]" style={{ color: 'var(--muted)' }}>
+              No projects yet. Create a project first, then assign it here.
+            </p>
+          ) : (
+            <div className="grid max-h-[220px] gap-1 overflow-y-auto rounded p-1" style={{ border: '1px solid var(--line)', background: '#fff' }}>
+              {projects
+                .filter((p) => p.kind === 'master')
+                .map((p) => (
+                  <label
+                    key={p.id}
+                    className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5"
+                    style={{ background: selected.has(p.id) ? 'var(--accent-soft)' : undefined }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(p.id)}
+                      onChange={() => onToggle(p.id)}
+                      className="h-4 w-4"
+                    />
+                    <span className="num text-[11.5px]" style={{ color: 'var(--muted)' }}>
+                      {p.code}
+                    </span>
+                    <span className="text-[13px]">{p.name}</span>
+                  </label>
+                ))}
+            </div>
+          )}
+          <p className="mt-2 mb-0 text-[11.5px]" style={{ color: 'var(--muted)' }}>
+            {selected.size} of {projects.filter((p) => p.kind === 'master').length} project(s) selected
+          </p>
+        </div>
+
+        <div className="flex items-center justify-between px-4 py-3" style={{ borderTop: '1px solid var(--line-2)' }}>
+          <span className="text-[11.5px]" style={{ color: 'var(--muted)' }}>
+            {user.projectScopeAll
+              ? 'Role scope is "All projects" — ticking here does not narrow it until the role changes.'
+              : 'Saves on confirm. The user is re-scoped on their next load.'}
+          </span>
+          <div className="flex gap-2">
+            <Button onClick={onCancel} disabled={busy}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={onSubmit} disabled={busy}>
+              {busy ? 'Saving…' : 'Save scope'}
+            </Button>
+          </div>
         </div>
       </div>
     </div>

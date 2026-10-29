@@ -233,6 +233,59 @@ function PlantCard({
   claims: RecordRow[];
   commissions: RecordRow[];
 }) {
+  const [clientApprovals, setClientApprovals] = useState<RecordRow[]>([]);
+  const [dsrs, setDsrs] = useState<RecordRow[]>([]);
+  const [dprs, setDprs] = useState<RecordRow[]>([]);
+
+  // CR-03: the two panels this plant is missing on its status view. Pending
+  // client approvals (with ageing) and the latest daily progress + site
+  // photos. Both are the plant's own rows, so fetch per plant, not the
+  // shared first-plant list the other registers use.
+  useEffect(() => {
+    let cancelled = false;
+    const guard = <T,>(q: Promise<T>, apply: (v: T) => void) =>
+      q.then((v) => { if (!cancelled) apply(v); }).catch(() => undefined);
+    guard(
+      records.list('client_approvals', { projectId: p.id, limit: 200 }),
+      (page) => setClientApprovals(page.items),
+    );
+    guard(records.list('dsr_entries', { projectId: p.id, limit: 50 }), (page) => setDsrs(page.items));
+    guard(records.list('pm_daily_progress', { projectId: p.id, limit: 50 }), (page) => setDprs(page.items));
+    return () => { cancelled = true; };
+  }, [p.id]);
+
+  // CR-03 derived values: pending client approvals (oldest first), the latest
+  // DSR and its site photos. "Published only" (CR-12) lands with the
+  // pm_daily_progress register in W3; until then the latest DSR is what the
+  // client sees.
+  const now = Date.now();
+  const pendingCa = clientApprovals
+    .filter((r) => ['Open', 'Overdue'].includes(String(r.data.status ?? 'Open')))
+    .sort((a, b) => ageDays(a) - ageDays(b));
+  // CR-12: the client sees the latest published DPR. A DPR is client-visible
+  // when visibleToClient is on and it has been published. Until a project has
+  // a published report, the latest DSR stands in for the daily progress line.
+  const publishedDpr = dprs
+    .filter((r) => r.data.visibleToClient === true || r.data.visibleToClient === 'true')
+    .filter((r) => ['Published to client', 'Approved'].includes(String(r.data.status ?? '')))
+    .sort((a, b) => new Date(String(b.data.date ?? 0)).getTime() - new Date(String(a.data.date ?? 0)).getTime())[0] ?? null;
+  const latestDsr = dsrs.length > 0
+    ? [...dsrs].sort((a, b) => new Date(String(b.data.date ?? 0)).getTime() - new Date(String(a.data.date ?? 0)).getTime())[0]
+    : null;
+  const sitePhotos: Array<{ url: string; name: string }> = (() => {
+    const v = publishedDpr ? publishedDpr.data.sitePhotos : latestDsr?.data.images;
+    if (!v) return [];
+    const arr = Array.isArray(v) ? v : [v];
+    return arr
+      .filter((x) => x && typeof x === 'object' && 'url' in x)
+      .map((x) => ({ url: String((x as { url: unknown }).url), name: String((x as { name?: unknown }).name ?? '') }));
+  })();
+
+  function ageDays(r: RecordRow): number {
+    const t = new Date(String(r.data.submittedOn ?? '')).getTime();
+    return Number.isNaN(t) ? 0 : Math.max(0, Math.floor((now - t) / 86_400_000));
+  }
+
   const openNcrs = ncrs.filter((r) => String(r.data.status) !== 'Closed');
   const openClaims = claims.filter((r) => !['Closed', 'Withdrew', 'Rejected'].includes(String(r.data.status ?? '')));
   const openCommissions = commissions.filter((r) => ['Not ready', 'Conditional', 'In progress'].includes(String(r.data.status ?? '')));
@@ -391,6 +444,115 @@ function PlantCard({
             />
           </div>
         ) : null}
+
+        {/* CR-03: pending client approvals, oldest first, with ageing */}
+        {pendingCa.length > 0 ? (
+          <div style={{ borderTop: '1px solid var(--line-2)' }}>
+            <div className="px-4 py-2.5 text-[12px] font-semibold" style={{ color: 'var(--muted)' }}>
+              PENDING CLIENT APPROVALS · {pendingCa.length}
+            </div>
+            <DataTable
+              columns={[
+                { key: 'it', label: 'Item' },
+                { key: 'sr', label: 'Source' },
+                { key: 'so', label: 'Submitted' },
+                { key: 'age', label: 'Ageing', align: 'right' },
+                { key: 'st', label: 'Status', align: 'right' },
+              ]}
+              rows={pendingCa.slice(0, 6).map((r) => [
+                String(r.data.itemType ?? '—'),
+                <span key="sr" className="num text-[11.5px]" style={{ color: 'var(--muted)' }}>
+                  {String(r.data.sourceRegister ?? r.data.itemType ?? '—')}
+                </span>,
+                fmtDay(r.data.submittedOn),
+                <span
+                  key="age"
+                  className="num text-[11.5px]"
+                  style={{ color: ageDays(r) >= 14 ? 'var(--red)' : ageDays(r) >= 7 ? 'var(--amber, #b45309)' : 'var(--muted)' }}
+                >
+                  {ageDays(r)}d
+                </span>,
+                <Chip key="st" tone={caTone(String(r.data.status ?? ''))}>{String(r.data.status ?? 'Open')}</Chip>,
+              ])}
+            />
+          </div>
+        ) : (clientApprovals.length > 0 ? (
+          <div style={{ borderTop: '1px solid var(--line-2)' }}>
+            <div className="px-4 py-2.5 text-[12px] font-semibold" style={{ color: 'var(--muted)' }}>
+              PENDING CLIENT APPROVALS · 0
+            </div>
+            <div className="px-4 py-3 text-[12px]" style={{ color: 'var(--faint)' }}>
+              Nothing is waiting on the client for this plant.
+            </div>
+          </div>
+        ) : null)}
+
+        {/* CR-03: latest daily progress + site photos (published items) */}
+        {publishedDpr ? (
+          <div style={{ borderTop: '1px solid var(--line-2)' }}>
+            <div className="px-4 py-2.5 text-[12px] font-semibold" style={{ color: 'var(--muted)' }}>
+              LATEST PUBLISHED DAILY PROGRESS · {fmtDay(publishedDpr.data.date)}
+            </div>
+            <div className="px-4 pb-4">
+              <div className="text-[13px]" style={{ color: 'var(--ink)' }}>
+                {String(publishedDpr.data.planTomorrow ?? '—')}
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-3 text-[12px]" style={{ color: 'var(--muted)' }}>
+                <span>Progress {String(publishedDpr.data.physicalProgress ?? '—')}%</span>
+                {publishedDpr.data.manpower ? <span>Manpower {String(publishedDpr.data.manpower)}</span> : null}
+                <Chip tone="mute">{String(publishedDpr.data.status ?? '')}</Chip>
+              </div>
+            </div>
+          </div>
+        ) : latestDsr ? (
+          <div style={{ borderTop: '1px solid var(--line-2)' }}>
+            <div className="px-4 py-2.5 text-[12px] font-semibold" style={{ color: 'var(--muted)' }}>
+              LATEST DAILY PROGRESS · {fmtDay(latestDsr.data.date)}
+            </div>
+            <div className="px-4 pb-4">
+              <div className="text-[13px]" style={{ color: 'var(--ink)' }}>
+                {String(latestDsr.data.activity ?? '—')}
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-3 text-[12px]" style={{ color: 'var(--muted)' }}>
+                {latestDsr.data.manpower ? <span>Manpower {String(latestDsr.data.manpower)}</span> : null}
+                {latestDsr.data.hoursLost ? <span>Hours lost {String(latestDsr.data.hoursLost)}</span> : null}
+                <Chip tone="mute">{String(latestDsr.data.status ?? '')}</Chip>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Site photos: from the published DPR when one exists, else the
+            latest DSR. Renders once, below whichever progress block is up. */}
+        {sitePhotos.length > 0 ? (
+          <div style={{ borderTop: '1px solid var(--line-2)' }}>
+            <div className="px-4 py-2.5 text-[12px] font-semibold" style={{ color: 'var(--muted)' }}>
+              LATEST SITE PHOTOS
+            </div>
+            <div className="px-4 pb-4">
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+                {sitePhotos.slice(0, 4).map((ph, i) => (
+                  <a
+                    key={i}
+                    href={ph.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block overflow-hidden rounded-md"
+                    style={{ border: '1px solid var(--line-2)' }}
+                    title={ph.name}
+                  >
+                    <img
+                      src={ph.url}
+                      alt={ph.name}
+                      className="aspect-square w-full object-cover"
+                      loading="lazy"
+                    />
+                  </a>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </Panel>
     </div>
   );
@@ -413,4 +575,14 @@ const MS_TONE: Record<string, 'ok' | 'info' | 'warn' | 'bad' | 'mute'> = {
 
 function msTone(s: string): 'ok' | 'info' | 'warn' | 'bad' | 'mute' {
   return MS_TONE[s] ?? 'mute';
+}
+
+const CA_TONE: Record<string, 'ok' | 'info' | 'warn' | 'bad' | 'mute'> = {
+  Open: 'info',
+  Overdue: 'bad',
+  Closed: 'mute',
+};
+
+function caTone(s: string): 'ok' | 'info' | 'warn' | 'bad' | 'mute' {
+  return CA_TONE[s] ?? 'warn';
 }

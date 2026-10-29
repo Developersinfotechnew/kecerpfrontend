@@ -21,11 +21,15 @@ import type { ProjectOption, NotificationItem } from '@/lib/services';
  * a module is a row in nav.seed.ts, never an edit here.
  */
 
-// Suites available in the sidebar. All six stay in SUITE_ORDER for
-// catalogue matching; DISABLED_SUITES is the gate that greys out pills
-// and hides their nav groups. Remove a key from this set to re-enable it.
+// Suites available in the sidebar. All six stay in SUITE_ORDER for catalogue
+// matching. The service suites (one per delivery stage) gate on the in-scope
+// project's service selection; backoffice and shared are always on. See the
+// disabledSuites memo below (CR-24).
 const SUITE_ORDER = ['backoffice', 'shared', 'epc', 'pmc', 'eptp', 'om'];
-const DISABLED_SUITES: ReadonlySet<string> = new Set(['pmc', 'eptp', 'om']);
+// The four service suites map 1:1 onto the delivery stages a project can opt
+// into. A suite is live only when its matching stage is selected for the
+// project; the client never sees a line they did not buy.
+const SERVICE_SUITES: ReadonlySet<string> = new Set(['epc', 'pmc', 'eptp', 'om']);
 
 export default function DashboardLayout({
   children,
@@ -96,11 +100,20 @@ export default function DashboardLayout({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.email]);
 
-  function pickScope(name: string): void {
+  function pickScope(name: string, projectId?: string): void {
     setScope(name);
     if (user) {
       const key = `kec.scope.${user.email}`;
       window.localStorage.setItem(key, name === 'All projects' ? '' : name);
+    }
+    // On a project page the sidebar pick and the URL are two views of the same
+    // thing. The detail page keys off the URL id, so a dropdown choice must
+    // rewrite that id or it shows the previous project. Pick a project → jump
+    // to its detail URL; All projects → back to the list.
+    const onProject = pathname === '/projects' || pathname.startsWith('/projects/');
+    if (onProject) {
+      if (name === 'All projects') router.push('/projects');
+      else if (projectId) router.push(`/projects/${projectId}`);
     }
   }
 
@@ -152,6 +165,23 @@ export default function DashboardLayout({
     [catalogue],
   );
 
+  // CR-24: which service suites are live for the scope. A project's enabled
+  // stages (from onboarding service selection, or a later scope change) gate
+  // their matching suites. "All projects" is the union across every in-scope
+  // project. backoffice and shared are never disabled — they carry the
+  // cross-project and administrative modules.
+  const disabledSuites = useMemo(() => {
+    const projects =
+      scope === 'All projects'
+        ? scopeProjects
+        : scopeProjects.filter((p) => p.name === scope);
+    const live = new Set<string>();
+    for (const p of projects) for (const stage of p.enabledStages ?? []) live.add(stage);
+    const out = new Set<string>();
+    for (const s of SERVICE_SUITES) if (!live.has(s)) out.add(s);
+    return out;
+  }, [scope, scopeProjects]);
+
   // If the active suite is disabled, fall back to the first enabled one so the
   // nav groups render. A user deep-linked to a /om/... route still gets a
   // working sidebar, just not the O&M pill.
@@ -159,8 +189,8 @@ export default function DashboardLayout({
   const active =
     !activeRaw
       ? undefined
-      : DISABLED_SUITES.has(activeRaw.suite)
-        ? ordered.find((s) => !DISABLED_SUITES.has(s.suite)) ?? activeRaw
+      : disabledSuites.has(activeRaw.suite)
+        ? ordered.find((s) => !disabledSuites.has(s.suite)) ?? activeRaw
         : activeRaw;
 
   if (loading) {
@@ -256,7 +286,7 @@ export default function DashboardLayout({
                   key={p.id}
                   type="button"
                   onClick={() => {
-                    pickScope(p.name);
+                    pickScope(p.name, p.id);
                     setScopeOpen(false);
                   }}
                   className="block w-full px-[11px] py-2 text-left text-[13px]"
@@ -281,7 +311,7 @@ export default function DashboardLayout({
           {ordered.map((s) => {
             const isActive = s.suite === activeSuite;
             const short = SUITE_LABELS[s.suite] ?? s.suite;
-            const disabled = DISABLED_SUITES.has(s.suite);
+            const disabled = disabledSuites.has(s.suite);
             return (
               <button
                 key={s.suite}

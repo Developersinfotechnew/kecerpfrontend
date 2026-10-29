@@ -88,6 +88,10 @@ export interface ProjectOption {
   scheduleDays: number;
   spi: number;
   cpi: number;
+  /** RAG override the PM sets; engine computes the rest. */
+  health?: 'green' | 'amber' | 'red';
+  /** CR-04: per-project client approval switch; the workflow engine skips client steps when false. */
+  clientApprovalsEnabled?: boolean;
   openActions: number;
   startDate: string | null;
   endDate: string | null;
@@ -120,6 +124,24 @@ export const projects = {
     body: CreateProjectInput,
   ): Promise<ProjectOption> {
     return api<ProjectOption>('/projects', { method: 'POST', body });
+  },
+
+  /** Edits the master-level fields of a project. Gated on project:update. */
+  async update(
+    id: string,
+    body: {
+      name?: string;
+      location?: string;
+      technology?: string;
+      capacityTpd?: number;
+      contractValue?: number;
+      startDate?: string | null;
+      endDate?: string | null;
+      health?: 'green' | 'amber' | 'red';
+      clientApprovalsEnabled?: boolean;
+    },
+  ): Promise<ProjectOption> {
+    return api<ProjectOption>(`/projects/${id}`, { method: 'PATCH', body });
   },
 
   /** The projects the calling user is a team member of, with their role. */
@@ -156,6 +178,19 @@ export const projects = {
  * rather than one plant. Counts come from live aggregation over the NCR,
  * claims and approval tables.
  */
+export interface ProcurementMis {
+  scopeLabel: string;
+  openPrsByStage: Array<{ stage: string; count: number }>;
+  rfqAwaitingOffers: number;
+  poPendingApproval: number;
+  delayedItems: number;
+  delayedOldestDays: number;
+  vendorPaymentsPending: number;
+  boqBudget: number;
+  poPlaced: number;
+  savingVsBoq: number;
+}
+
 export interface MisProjectRow {
   projectId: string;
   name: string;
@@ -171,6 +206,10 @@ export interface MisProjectRow {
   openNcrs: number;
   openClaims: number;
   pendingApprovals: number;
+  pendingClientApprovals: number;
+  clientApprovalAgeDays: number;
+  /** CR-13: month-to-date DPR compliance, 0-100. */
+  dprCompliance?: number;
   finalAccount: number;
   closedAccounts: number;
 }
@@ -182,6 +221,8 @@ export interface MisResult {
   totalOpenNcrs: number;
   totalOpenClaims: number;
   totalPendingApprovals: number;
+  totalPendingClientApprovals: number;
+  totalDprCompliance: number;
   orderBook: number;
   totalEac: number;
   totalBudget: number;
@@ -210,12 +251,21 @@ export interface ClientEntity {
   name: string;
   plant: string;
   services: ServiceLine[];
+  contacts: Array<{
+    name: string;
+    designation: string;
+    email: string;
+    mobile: string;
+    approverLevel: 'Engineer' | 'Management' | 'Other';
+  }>;
   contactName: string;
   contactEmail: string;
   contactPhone: string;
   externalRef: string;
   isActive: boolean;
 }
+
+export type ClientContact = ClientEntity['contacts'][number];
 
 /** A user eligible to be named as a project manager. */
 export interface ManagerOption {
@@ -244,6 +294,13 @@ export const admin = {
       code?: string;
       plant?: string;
       services?: ServiceLine[];
+      contacts?: Array<{
+        name: string;
+        designation?: string;
+        email?: string;
+        mobile?: string;
+        approverLevel?: 'Engineer' | 'Management' | 'Other';
+      }>;
       contactName?: string;
       contactEmail?: string;
       contactPhone?: string;
@@ -531,10 +588,15 @@ export const approvals = {
     return api<unknown[]>('/workflow/queue');
   },
 
-  async act(id: string, action: 'approve' | 'reject' | 'return', remark: string): Promise<unknown> {
+  async act(
+    id: string,
+    action: 'approve' | 'reject' | 'return',
+    remark: string,
+    evidence?: { url: string; name: string } | null,
+  ): Promise<unknown> {
     return api(`/workflow/instances/${id}/act`, {
       method: 'POST',
-      body: { action, remark },
+      body: { action, remark, evidence: evidence ?? null },
     });
   },
 
@@ -916,6 +978,18 @@ export const records = {
 
   async remove(key: string, id: string): Promise<{ id: string }> {
     return api(`/records/${key}/${id}`, { method: 'DELETE' });
+  },
+
+  /** CR-26: the procurement department dashboard, cross project. */
+  async procurementMis(): Promise<ProcurementMis> {
+    return api<ProcurementMis>('/records/procurement-mis');
+  },
+
+  /** CR-11: prefill the PM daily progress report from a day's DSRs. */
+  async dprPrefill(projectId: string, date: string): Promise<Record<string, unknown> | null> {
+    return api<Record<string, unknown> | null>(
+      `/records/dpr-prefill?projectId=${encodeURIComponent(projectId)}&date=${encodeURIComponent(date)}`,
+    );
   },
 
   async vocabulary(): Promise<RecordTypeVocabulary> {

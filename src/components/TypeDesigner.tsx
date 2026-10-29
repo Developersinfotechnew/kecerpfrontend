@@ -40,6 +40,7 @@ const FIELD_TYPE_LABELS: Record<FieldType, string> = {
   status: 'Status',
   ref: 'Reference',
   boolean: 'Yes / No',
+  table: 'Table',
   file: 'File',
 };
 
