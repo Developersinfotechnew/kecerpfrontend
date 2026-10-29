@@ -470,17 +470,70 @@ function FileInput({
     );
   }
 
+  // Empty state: a styled pick-zone, not the native control. The native
+  // input stays in the tree, visually hidden, so keyboard and screen-reader
+  // semantics are untouched; the dashed card is its label.
   return (
-    <input
-      type="file"
-      onChange={(e) => {
-        const file = e.target.files?.[0];
-        if (file) onPick(file);
-        e.target.value = '';
+    <label
+      className="flex w-full cursor-pointer items-center gap-3 rounded-md px-3.5 py-3"
+      style={{
+        border: '1.5px dashed var(--line)',
+        background: 'var(--panel-2, #f9faf8)',
+        transition: 'border-color 0.15s ease',
       }}
-      className="block w-full text-[12.5px]"
-      style={{ color: 'var(--muted)' }}
-    />
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        const file = e.dataTransfer.files?.[0];
+        if (file) onPick(file);
+      }}
+    >
+      <svg
+        width="26"
+        height="26"
+        viewBox="0 0 24 24"
+        fill="none"
+        className="flex-none"
+        aria-hidden="true"
+      >
+        <path
+          d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"
+          stroke="var(--muted)"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M14 3v4a1 1 0 0 0 1 1h4"
+          stroke="var(--muted)"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <span className="text-[12.5px]">
+        <span className="font-semibold" style={{ color: 'var(--ink)' }}>
+          Choose a document
+        </span>
+        <span className="block text-[11.5px]" style={{ color: 'var(--muted)' }}>
+          PDF, DWG, XLSX or image · uploaded on save
+        </span>
+      </span>
+      <input
+        type="file"
+        className="sr-only"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) onPick(file);
+          e.target.value = '';
+        }}
+      />
+    </label>
   );
 }
 

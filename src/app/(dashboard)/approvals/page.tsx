@@ -14,6 +14,7 @@ import type {
 import type { RecordRow, RecordType } from '@/lib/types';
 import { RecordForm } from '@/components/RecordForm';
 import { Button, Chip, DataTable, Notice, PageHead, Panel, VitalsRail } from '@/components/ui';
+import { StepTracker } from '@/components/StepTracker';
 
 interface QueueItem {
   id: string;
@@ -27,6 +28,18 @@ interface QueueItem {
   totalSteps: number;
   requestedByEmail: string;
   createdAt: string;
+  /** Live chain with per-step states, from the backend. */
+  chain?: Array<{ order: number; name: string; role: string; state: 'done' | 'current' | 'pending' }>;
+  /** Decisions recorded on the chain. */
+  actions?: Array<{
+    stepOrder: number;
+    role: string;
+    actorEmail: string;
+    actorName: string;
+    action: string;
+    remark: string;
+    at: string;
+  }>;
 }
 
 /**
@@ -79,6 +92,7 @@ export default function ApprovalsPage() {
   const [editing, setEditing] = useState<{ type: RecordType; row: RecordRow } | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyTab, setHistoryTab] = useState<HistoryStatus | 'all'>('all');
+  const [histTrackId, setHistTrackId] = useState<string | null>(null);
   const [projectNames, setProjectNames] = useState<Map<string, string>>(new Map());
 
   const loadHistory = useCallback(async (tab: HistoryStatus | 'all') => {
@@ -234,113 +248,89 @@ export default function ApprovalsPage() {
             Nothing waiting on you.
           </div>
         ) : (
-          <DataTable
-            columns={[
-              { key: 'ref', label: 'Reference' },
-              { key: 'prio', label: 'Priority' },
-              { key: 'project', label: 'Project' },
-              { key: 'step', label: 'Step' },
-              { key: 'amount', label: 'Value', align: 'right' },
-              { key: 'by', label: 'Requested by' },
-              { key: 'age', label: 'Raised' },
-              { key: 'note', label: 'Note to requester', align: 'left' },
-              { key: 'actions', label: 'Decision', align: 'right' },
-            ]}
-            rows={items.map((item) => [
-              <span key="r">
-                <span className="num text-[12.5px] font-semibold">{item.entityId}</span>
-                <span className="block text-[11.5px]" style={{ color: 'var(--muted)' }}>
-                  {item.entity}
-                </span>
-              </span>,
-              <span key="prio">
-                <PrioChip priority={item.priority} />
-              </span>,
-              <span key="pj">
-                {item.projectId ? (
-                  <>
-                    <span className="text-[12.5px] font-medium">
-                      {projectNames.get(item.projectId) ?? item.projectId}
+          <div className="divide-y" style={{ borderColor: 'var(--line)' }}>
+            {items.map((item) => (
+              <div key={item.id} className="px-4 py-3.5">
+                {/* Card header: what it is, who asked, how much, how urgent */}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                  <div>
+                    <span className="num text-[13px] font-semibold">{item.entityId}</span>
+                    <span className="ml-2 text-[11.5px]" style={{ color: 'var(--muted)' }}>
+                      {item.entity.replaceAll('_', ' ')}
                     </span>
-                  </>
-                ) : (
-                  <span className="text-[11.5px]" style={{ color: 'var(--faint)' }}>
-                    No project
-                  </span>
-                )}
-              </span>,
-              <span key="s">
-                {item.stepName}
-                <span className="block text-[11.5px]" style={{ color: 'var(--muted)' }}>
-                  step {item.stepOrder} of {item.totalSteps}
-                </span>
-              </span>,
-              <span key="a" className="num">
-                ₹{item.amount.toLocaleString('en-IN')}
-              </span>,
-              <span key="b" className="text-[12.5px]" style={{ color: 'var(--muted)' }}>
-                {item.requestedByEmail}
-              </span>,
-              <span key="c" className="text-[12.5px]" style={{ color: 'var(--muted)' }}>
-                {new Date(item.createdAt).toLocaleDateString('en-IN', {
-                  day: '2-digit',
-                  month: 'short',
-                })}
-              </span>,
-              <span key="n" style={{ minWidth: 220 }}>
-                <input
-                  type="text"
-                  placeholder="Add a note for the requester…"
-                  value={notes[item.id] ?? ''}
-                  onChange={(e) => setNotes((p) => ({ ...p, [item.id]: e.target.value }))}
-                  className="w-full rounded px-2.5 py-1.5 text-[12.5px]"
-                  style={{
-                    border: '1px solid var(--line)',
-                    background: 'var(--panel)',
-                    color: 'var(--ink)',
-                    outline: 'none',
-                  }}
-                />
-                {trailId === item.id && trail.length > 0 ? (
-                  <div
-                    className="mt-2 rounded p-2 text-[11.5px]"
-                    style={{ background: 'var(--panel-2, var(--panel))', border: '1px solid var(--line-2)', color: 'var(--muted)' }}
-                  >
-                    <div className="mb-1 font-medium" style={{ color: 'var(--ink)' }}>
-                      Earlier decisions
-                    </div>
-                    {trail.map((a, i) => (
-                      <div key={i} className="flex flex-wrap gap-x-2">
-                        <span style={{ color: 'var(--ink)' }}>{a.action}</span>
-                        <span>· {a.actorName || a.actorEmail}</span>
-                        {a.role ? <span style={{ color: 'var(--faint)' }}>({a.role})</span> : null}
-                        {a.remark ? <span>· “{a.remark}”</span> : null}
-                      </div>
-                    ))}
                   </div>
-                ) : null}
-                <button
-                  type="button"
-                  className="mt-1.5 text-[11px] underline"
-                  style={{ color: 'var(--blue, var(--accent))' }}
-                  onClick={() => void toggleTrail(item)}
-                >
-                  {trailId === item.id ? 'Hide earlier notes' : 'View earlier notes'}
-                </button>
-              </span>,
-              <span key="d" className="flex justify-end gap-2">
-                <Button
-                  variant="primary"
-                  onClick={() => void act(item.id, 'approve')}
-                  className={busyId === item.id ? 'opacity-50' : ''}
-                >
-                  Approve
-                </Button>
-                <Button onClick={() => void act(item.id, 'reject')}>Reject</Button>
-                <Button onClick={() => void act(item.id, 'return')}>Return</Button>
-              </span>,
-            ])}
-          />
+                  <PrioChip priority={item.priority} />
+                  {item.projectId ? (
+                    <Chip tone="mute">
+                      {projectNames.get(item.projectId) ?? item.projectId}
+                    </Chip>
+                  ) : null}
+                  <span className="num ml-auto text-[13px] font-semibold">
+                    ₹{item.amount.toLocaleString('en-IN')}
+                  </span>
+                  <span className="text-[11.5px]" style={{ color: 'var(--muted)' }}>
+                    {item.requestedByEmail} ·{' '}
+                    {new Date(item.createdAt).toLocaleDateString('en-IN', {
+                      day: '2-digit',
+                      month: 'short',
+                    })}
+                  </span>
+                </div>
+
+                {/* The chain position */}
+                {item.chain && item.chain.length > 0 ? (
+                  <div className="mt-3">
+                    <StepTracker chain={item.chain} actions={item.actions ?? []} status="pending" />
+                  </div>
+                ) : (
+                  <div className="mt-2 text-[12px]" style={{ color: 'var(--muted)' }}>
+                    {item.stepName} · step {item.stepOrder} of {item.totalSteps}
+                    {trailId === item.id && trail.length > 0 ? (
+                      <div className="mt-1.5">
+                        {trail.map((a, i) => (
+                          <div key={i} className="text-[11.5px]">
+                            <span style={{ color: 'var(--ink)' }}>{a.action}</span>
+                            <span> · {a.actorName || a.actorEmail}</span>
+                            {a.remark ? <span> · “{a.remark}”</span> : null}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+
+                {/* Decision footer: note + the three calls */}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="Note for the requester…"
+                    value={notes[item.id] ?? ''}
+                    onChange={(e) => setNotes((p) => ({ ...p, [item.id]: e.target.value }))}
+                    className="w-full max-w-[320px] flex-1 rounded-md px-3 py-2 text-[12.5px]"
+                    style={{
+                      border: '1px solid var(--line)',
+                      background: 'var(--panel)',
+                      color: 'var(--ink)',
+                      outline: 'none',
+                    }}
+                  />
+                  <div className="flex flex-none items-center gap-2">
+                    <Button
+                      variant="primary"
+                      onClick={() => void act(item.id, 'approve')}
+                      className={busyId === item.id ? 'opacity-50' : ''}
+                    >
+                      Approve
+                    </Button>
+                    <Button onClick={() => void act(item.id, 'return')}>Return</Button>
+                    <Button onClick={() => void act(item.id, 'reject')} className="text-[color:var(--danger,#c0392b)]">
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </Panel>
 
@@ -507,6 +497,7 @@ export default function ApprovalsPage() {
               { key: 'role', label: 'Your role' },
               { key: 'value', label: 'Value', align: 'right' },
               { key: 'last', label: 'Last action' },
+              { key: 'track', label: 'Chain' },
               { key: 'when', label: 'Updated' },
             ]}
             rows={history.map((h) => [
@@ -543,6 +534,16 @@ export default function ApprovalsPage() {
                   <span style={{ color: 'var(--faint)' }}>—</span>
                 )}
               </span>,
+              <span key="track">
+                <button
+                  type="button"
+                  className="text-[11px] underline"
+                  style={{ color: 'var(--blue, var(--accent))' }}
+                  onClick={() => setHistTrackId(histTrackId === h.id ? null : h.id)}
+                >
+                  {histTrackId === h.id ? 'Hide' : 'Track'}
+                </button>
+              </span>,
               <span key="w" className="text-[12.5px]" style={{ color: 'var(--muted)' }}>
                 {new Date(h.updatedAt).toLocaleString('en-IN', {
                   day: '2-digit',
@@ -554,6 +555,15 @@ export default function ApprovalsPage() {
             ])}
           />
         )}
+        {history.some((h) => h.id === histTrackId) ? (
+          <div className="px-4 pb-4">
+            <StepTracker
+              chain={history.find((h) => h.id === histTrackId)?.chain ?? []}
+              actions={history.find((h) => h.id === histTrackId)?.actions ?? []}
+              status={history.find((h) => h.id === histTrackId)?.status}
+            />
+          </div>
+        ) : null}
       </Panel>
 
       <Panel title="How an approval moves" sub="Every step is owned by a role, not a person">

@@ -77,11 +77,17 @@ export interface ProjectOption {
   pm: string;
   clientName: string;
   capacityTpd: number;
+  contractNo?: string;
+  currency?: string;
+  projectType?: string;
+  targetMargin?: number;
   contractValue: number;
   budget: number;
   committed: number;
   actual: number;
   eac: number;
+  baselineStart?: string | null;
+  baselineFinish?: string | null;
   billed: number;
   collected: number;
   progress: number;
@@ -92,6 +98,8 @@ export interface ProjectOption {
   health?: 'green' | 'amber' | 'red';
   /** CR-04: per-project client approval switch; the workflow engine skips client steps when false. */
   clientApprovalsEnabled?: boolean;
+  /** CR-13: daily DPR submission cutoff, "HH:MM" project-local. */
+  dprCutoffTime?: string;
   openActions: number;
   startDate: string | null;
   endDate: string | null;
@@ -164,6 +172,14 @@ export const projects = {
     return api(`/projects/${projectId}/team/${memberId}`, { method: 'DELETE' });
   },
 
+  /** Change a team member's role on the project. Superadmin only. */
+  async changeTeamRole(projectId: string, memberId: string, role: string): Promise<{ id: string; role: string }> {
+    return api(`/projects/${projectId}/team/${memberId}`, {
+      method: 'PATCH',
+      body: { role },
+    });
+  },
+
   /** Portfolio MIS roll-up: one row per project with open NCRs, claims and approvals. */
   async portfolioMis(): Promise<MisResult> {
     return api<MisResult>('/projects/portfolio-mis');
@@ -189,6 +205,16 @@ export interface ProcurementMis {
   boqBudget: number;
   poPlaced: number;
   savingVsBoq: number;
+}
+
+export interface DciMis {
+  scopeLabel: string;
+  total: number;
+  byStatus: Array<{ status: string; count: number }>;
+  byDiscipline: Array<{ discipline: string; count: number }>;
+  overdue: number;
+  openTransmittals: number;
+  oldestOpenTransmittal: { transmittalNo: string; sentOn: string; daysOpen: number } | null;
 }
 
 export interface MisProjectRow {
@@ -574,6 +600,19 @@ export interface CreateProjectInput {
   clientId: string;
   capacityTpd: number;
   contractValue: number;
+  /** Commercial reference from the award. Optional on create. */
+  contractNo?: string;
+  /** Approved budget envelope, ₹ lakhs. */
+  budget?: number;
+  /** Target margin, 0–100. */
+  targetMargin?: number;
+  /** EPC / CBG / Plant / other — the PDF "Project group" field. */
+  projectType?: string;
+  /** Project currency; defaults to INR on the backend. */
+  currency?: string;
+  /** Schedule baseline, separate from the contract dates. */
+  baselineStart?: string | null;
+  baselineFinish?: string | null;
   startDate: string;
   endDate: string;
   enabledStages: ('pmc' | 'epc' | 'eptp' | 'om')[];
@@ -836,6 +875,18 @@ export interface HistoryItem {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  /** Live chain with per-step states, from the backend. */
+  chain: Array<{ order: number; name: string; role: string; state: 'done' | 'current' | 'pending' }>;
+  /** Decisions recorded on the chain. */
+  actions: Array<{
+    stepOrder: number;
+    role: string;
+    actorEmail: string;
+    actorName: string;
+    action: string;
+    remark: string;
+    at: string;
+  }>;
 }
 
 export interface ApprovalInstanceSummary {
@@ -983,6 +1034,11 @@ export const records = {
   /** CR-26: the procurement department dashboard, cross project. */
   async procurementMis(): Promise<ProcurementMis> {
     return api<ProcurementMis>('/records/procurement-mis');
+  },
+
+  /** Document Control Index dashboard, cross project. */
+  async dciMis(): Promise<DciMis> {
+    return api<DciMis>('/records/dci-mis');
   },
 
   /** CR-11: prefill the PM daily progress report from a day's DSRs. */

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { approvals } from '@/lib/services';
+import { StepTracker } from '@/components/StepTracker';
 import type {
   ApprovalChain,
   ApprovalChainStep,
@@ -388,23 +389,26 @@ export default function ApprovalChainsPage() {
 
                   {expanded ? (
                     <div className="px-4 pb-4">
-                      {/* Chain steps */}
+                      {/* Live step tracker: done / current / pending, with the
+                          decisions recorded on each step. The chain is read
+                          against the live definition, so an admin edit of the
+                          workflow shows here on reload. */}
                       <div className="mb-3">
-                        <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--muted)' }}>
-                          Chain
-                        </div>
-                        <div className="flex flex-wrap items-center gap-1">
-                          {inst.chain.map((s, i) => (
-                            <div key={s.order} className="flex items-center gap-1">
-                              {i > 0 ? (
-                                <span style={{ color: 'var(--muted)' }}>→</span>
-                              ) : null}
-                              <Chip tone={s.order < inst.currentStep ? 'ok' : s.order === inst.currentStep ? 'warn' : 'mute'}>
-                                {s.order}. {fmtRole(s.role)}
-                              </Chip>
-                            </div>
-                          ))}
-                        </div>
+                        <StepTracker
+                          chain={inst.chain.map((s) => ({
+                            ...s,
+                            state:
+                              s.order < inst.currentStep
+                                ? 'done'
+                                : s.order === inst.currentStep
+                                  ? inst.status === 'pending'
+                                    ? 'current'
+                                    : 'done'
+                                  : 'pending',
+                          }))}
+                          actions={inst.actions}
+                          status={inst.status}
+                        />
                       </div>
 
                       {/* Actions taken */}

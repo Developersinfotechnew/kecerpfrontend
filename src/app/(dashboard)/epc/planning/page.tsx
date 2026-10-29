@@ -21,6 +21,9 @@ export default function EpcPlanningPage() {
   const [adding, setAdding] = useState(false);
   const [cpm, setCpm] = useState<CpmResult | null>(null);
   const [cpmError, setCpmError] = useState<string | null>(null);
+  // Baseline shows the planned bars only. Actual overlays each activity's
+  // completion on top of the same bar, so plan vs done read at a glance.
+  const [view, setView] = useState<'baseline' | 'actual'>('baseline');
 
   const loadCpm = useCallback(async () => {
     if (!p) return;
@@ -66,7 +69,12 @@ export default function EpcPlanningPage() {
         description={`Phases, milestones and site tasks for ${p.name}. Every task carries an owner, a due date and completion evidence.`}
         actions={
           <>
-            <Button>Baseline vs actual</Button>
+            <Button
+              variant={view === 'actual' ? 'primary' : 'default'}
+              onClick={() => setView((v) => (v === 'actual' ? 'baseline' : 'actual'))}
+            >
+              {view === 'actual' ? 'Actual view' : 'Baseline vs actual'}
+            </Button>
             <Button variant="primary" onClick={() => setAdding(true)}>Add task</Button>
           </>
         }
@@ -103,15 +111,17 @@ export default function EpcPlanningPage() {
             <Gantt
               months={ganttMonths(cpm)}
               todayPct={todayPct(cpm)}
+              actual={view === 'actual'}
               rows={cpm.activities.map((a) => ({
                 label: `${a.wbsCode} · ${a.description}`,
-                sub: `${a.owner || 'Unassigned'} · float ${a.totalFloat} d${
+                sub: `${a.owner || 'Unassigned'} · float ${a.totalFloat} d · ${a.progress}% done${
                   a.predecessor ? ` · pred ${a.predecessor} ${a.relType}` : ''
                 }`,
                 startPct: pct(a.earlyStart, cpm.projectStart, cpm.projectFinish),
                 widthPct: widthPct(Math.max(1, a.duration), cpm.projectStart, cpm.projectFinish),
                 tone: a.isCritical ? ('crit' as const) : a.progress > 0 ? ('ok' as const) : ('mute' as const),
                 critical: a.isCritical,
+                progress: a.progress,
               }))}
             />
             <GanttLegend
@@ -119,6 +129,7 @@ export default function EpcPlanningPage() {
                 { color: 'var(--red)', label: 'Critical path (zero float)' },
                 { color: 'var(--accent)', label: 'Started, non-critical' },
                 { color: '#b9c4be', label: 'Not started' },
+                { color: 'rgba(0,0,0,0.28)', label: 'Actual progress (dark fill)' },
               ]}
             />
           </Panel>

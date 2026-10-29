@@ -60,6 +60,10 @@ export default function EpcDashboardPage() {
   const [grnRows, setGrnRows] = useState<RecordRow[]>([]);
   const [wpRows, setWpRows] = useState<RecordRow[]>([]);
   const [hseRows, setHseRows] = useState<RecordRow[]>([]);
+  const [ncrRows, setNcrRows] = useState<RecordRow[]>([]);
+  const [boqRows, setBoqRows] = useState<RecordRow[]>([]);
+  const [commRows, setCommRows] = useState<RecordRow[]>([]);
+  const [raRows, setRaRows] = useState<RecordRow[]>([]);
   const [cpm, setCpm] = useState<CpmResult | null>(null);
 
   useEffect(() => {
@@ -76,8 +80,13 @@ export default function EpcDashboardPage() {
       setGrnRows(page.items);
     });
     guard(approvals.queue(), (q) => setPendingApprovals(q.length));
-    guard(records.list('ncr_register', { limit: 300 }), (page) =>
-      setNcrOpen(page.items.filter((r) => String(r.data.status) !== 'Closed').length));
+    guard(records.list('ncr_register', { limit: 300 }), (page) => {
+      setNcrRows(page.items);
+      setNcrOpen(page.items.filter((r) => String(r.data.status) !== 'Closed').length);
+    });
+    guard(records.list('boq_register', { limit: 300 }), (page) => setBoqRows(page.items));
+    guard(records.list('commissioning_tests', { limit: 300 }), (page) => setCommRows(page.items));
+    guard(records.list('ra_bills', { limit: 300 }), (page) => setRaRows(page.items));
     guard(records.list('claims_register', { limit: 300 }), (page) =>
       setClaimsOpen(page.items.filter((r) => !['Closed', 'Withdrew', 'Rejected'].includes(String(r.data.status ?? ''))).length));
     guard(records.list('wbs_register', { limit: 300 }), (page) => setWbsRows(page.items));
@@ -103,15 +112,22 @@ export default function EpcDashboardPage() {
 
   // --- derived chart data ------------------------------------------------
 
+  // Resolved NCRs are the rows whose status read Closed — a real count,
+  // not a back-solved difference against the WBS.
+  const ncrResolved = useMemo(
+    () => ncrRows.filter((r) => String(r.data.status) === 'Closed').length,
+    [ncrRows],
+  );
+
   const ncrDonut = useMemo(() => {
-    if (!p) return [];
     const open = ncrOpen;
-    const resolved = Math.max(0, (wbsRows.length > 0 ? wbsRows.length : 10) - open);
+    const resolved = ncrResolved;
     return [
       { value: open, color: 'var(--danger)', label: 'Open NCR' },
       { value: resolved, color: 'var(--ok)', label: 'Resolved' },
     ].filter((s) => s.value > 0);
-  }, [ncrOpen, wbsRows.length, p]);
+  }, [ncrOpen, ncrResolved]);
+
 
   const costBars = useMemo(() => {
     if (!p) return [];
@@ -211,6 +227,83 @@ export default function EpcDashboardPage() {
   // HSE open observations count
   const hseOpen = hseRows.length;
 
+  // Health is the composite the KEC matrix describes: SPI and CPI each carry
+  // weight, and open quality / HSE / claim items pull it down. Not a fixed
+  // map — it moves as the indexes and registers move.
+  // The hooks run before the !p guard, so every derivation reads p through a
+  // null-safe fallback.
+  const health = useMemo(() => {
+    if (!p) return 0;
+    let score = 100;
+    score -= Math.max(0, (1 - p.spi) * 200);
+    score -= Math.max(0, (1 - p.cpi) * 200);
+    score -= Math.min(15, ncrOpen);
+    score -= Math.min(10, hseOpen);
+    score -= Math.min(10, claimsOpen * 2);
+    return Math.round(Math.max(0, Math.min(100, score)));
+  }, [p, ncrOpen, hseOpen, claimsOpen]);
+  const healthTone: 'ok' | 'warn' | 'bad' = health >= 80 ? 'ok' : health >= 60 ? 'warn' : 'bad';
+
+  // Stage-gate, derived from the registers instead of hardcoded:
+  //   setup — the project exists and is live
+  //   BOQ   — any BOQ row has cleared approval
+  //   procurement — a PO has been raised
+  //   erection — WBS work in progress
+  //   commissioning — any commissioning test at Passed+
+  //   billing — an RA bill exists
+  //   closure — every open item is gone
+  const stageGate = useMemo(() => {
+    const boqDone = boqRows.some((r) => ['Approved', 'Frozen', 'Baseline'].includes(String(r.data.status ?? '')));
+    const poDone = poRows.length > 0;
+    const erectDone = wbsRows.some((r) => Number(r.data.progress ?? 0) > 0);
+    const commDone = commRows.some((r) => ['Passed', 'Closed'].includes(String(r.data.status ?? '')));
+    const billDone = raRows.length > 0;
+    const allDone = ncrOpen === 0 && claimsOpen === 0 && (pendingApprovals ?? 0) === 0;
+    const states = [
+      !p || p.status !== 'Planning',
+      boqDone,
+      poDone,
+      erectDone,
+      commDone,
+      billDone,
+      allDone,
+    ];
+    // The first not-done step is 'now'; everything before it is 'done', and
+    // the first not-done step at all is 'now' unless the project is finished.
+    const nowAt = states.findIndex((s) => !s);
+    const stateOf = (i: number): 'done' | 'now' | 'todo' =>
+      nowAt === -1 ? 'done' : i < nowAt ? 'done' : i === nowAt ? 'now' : 'todo';
+    const labels = [
+      'Project setup',
+      'BOQ approved',
+      'Procurement',
+      'Material & erection',
+      'Commissioning',
+      'Final billing',
+      'Closure',
+    ];
+    return {
+      steps: labels.map((label, i) => ({ label, state: stateOf(i) })),
+    };
+  }, [p?.status, boqRows, poRows, wbsRows, commRows, raRows, ncrOpen, claimsOpen, pendingApprovals]);
+
+  // The driving activity: the open (non-complete) activity on the CPM
+  // critical path with the smallest total float. The float figure next to it
+  // is that same number, not a fixed zero.
+  const scheduleFact = useMemo(() => {
+    if (!cpm) return null;
+    const openCritical = cpm.criticalPath.filter((a) => a.progress < 100);
+    const driving = openCritical.length > 0
+      ? openCritical.reduce((min, a) => (a.totalFloat < min.totalFloat ? a : min))
+      : null;
+    // The float of the driving activity, or 0 when the path is complete.
+    const float = driving ? Math.max(0, driving.totalFloat) : 0;
+    return {
+      driving: driving ? `${driving.wbsCode} · ${driving.description}` : cpm.criticalPath.length > 0 ? 'Complete' : 'No critical path yet',
+      float,
+    };
+  }, [cpm]);
+
   // CPM: critical path length + total activities
   const cpmSummary = useMemo(() => {
     if (!cpm) return null;
@@ -237,9 +330,6 @@ export default function EpcDashboardPage() {
   if (!p) {
     return <PageHead title="EPC dashboard" description="No project is in your scope." />;
   }
-
-  const health = p.risk === 'bad' ? 58 : p.risk === 'warn' ? 71 : 86;
-  const healthTone = p.risk === 'bad' ? 'bad' : p.risk === 'warn' ? 'warn' : 'ok';
 
   return (
     <>
@@ -323,17 +413,7 @@ export default function EpcDashboardPage() {
       <Grid cols={3}>
         <Panel title="Stage-gate" sub="KEC execution cycle" bodyless>
           <div className="p-4">
-            <Flow
-              steps={[
-                { label: 'Project setup', state: 'done' },
-                { label: 'BOQ approved', state: 'done' },
-                { label: 'Procurement', state: 'done' },
-                { label: 'Material & erection', state: 'now' },
-                { label: 'Commissioning', state: 'todo' },
-                { label: 'Final billing', state: 'todo' },
-                { label: 'Closure', state: 'todo' },
-              ]}
-            />
+            <Flow steps={stageGate.steps} />
           </div>
         </Panel>
 
@@ -507,7 +587,11 @@ export default function EpcDashboardPage() {
         <div>
           <Panel
             title="Milestones"
-            actions={<Button variant="small">Open planning</Button>}
+            actions={
+              <Button variant="small" onClick={() => router.push('/epc/planning')}>
+                Open planning
+              </Button>
+            }
             bodyless
           >
             <DataTable
@@ -591,8 +675,8 @@ export default function EpcDashboardPage() {
             <KVList
               pairs={[
                 ['Critical path', <Chip key="cp" tone={p.cp === 'On track' ? 'ok' : 'bad'}>{p.cp}</Chip>],
-                ['Driving activity', 'Digester fabrication'],
-                ['Total float remaining', '0 days'],
+                ['Driving activity', scheduleFact ? <span key="da" className="truncate text-[12px]" title={scheduleFact.driving}>{scheduleFact.driving}</span> : 'Loading CPM…'],
+                ['Total float remaining', <span key="f" className="num">{scheduleFact ? `${scheduleFact.float}d` : '…'}</span>],
                 ['SPI · schedule', <span key="s" className="num" style={{ color: p.spi < 0.95 ? 'var(--red)' : 'var(--accent-dark)' }}>{p.spi.toFixed(2)}</span>],
                 ['CPI · cost', <span key="c" className="num" style={{ color: p.cpi < 1 ? 'var(--amber)' : 'var(--accent-dark)' }}>{p.cpi.toFixed(2)}</span>],
                 ['Forecast at completion', <span key="e" className="num">{L(p.eac)}</span>],

@@ -107,18 +107,36 @@ export default function ProjectDetailPage() {
             </div>
 
             <div className="grid grid-cols-2 gap-x-4 gap-y-3 p-4 sm:grid-cols-4">
+              <Fact label="Client" value={p.clientName || '—'} />
+              <Fact label="Contract no." value={p.contractNo || '—'} />
+              <Fact label="Project type" value={p.projectType || 'EPC'} />
+              <Fact label="Currency" value={p.currency || 'INR'} />
               <Fact label="Capacity" value={`${p.capacityTpd} TPD`} />
+              <Fact label="Technology" value={p.technology || '—'} />
+              <Fact label="PM" value={p.pm || '—'} />
+              <Fact label="Target margin" value={p.targetMargin ? `${p.targetMargin}%` : '—'} />
               <Fact label="Contract value" value={`₹${p.contractValue.toLocaleString('en-IN')} L`} />
               <Fact label="Budget" value={p.budget ? `₹${p.budget.toLocaleString('en-IN')} L` : '—'} />
               <Fact label="Est. at completion" value={p.eac ? `₹${p.eac.toLocaleString('en-IN')} L` : '—'} />
-              <Fact label="Technology" value={p.technology || '—'} />
-              <Fact label="PM" value={p.pm || '—'} />
+              <Fact label="Contract start" value={p.startDate ? new Date(p.startDate).toLocaleDateString('en-IN') : '—'} />
+              <Fact label="Planned completion" value={p.endDate ? new Date(p.endDate).toLocaleDateString('en-IN') : '—'} />
+              <Fact
+                label="Schedule baseline"
+                value={
+                  p.baselineStart && p.baselineFinish
+                    ? `${new Date(p.baselineStart).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })} – ${new Date(p.baselineFinish).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}`
+                    : '—'
+                }
+              />
+              <Fact
+                label="DPR cutoff"
+                value={p.dprCutoffTime ?? '20:00'}
+              />
               <Fact
                 label="Client approvals"
                 value={p.clientApprovalsEnabled === false ? 'Off · offline evidence' : 'On · portal client steps'}
               />
-              <Fact label="Contract start" value={p.startDate ? new Date(p.startDate).toLocaleDateString('en-IN') : '—'} />
-              <Fact label="Planned completion" value={p.endDate ? new Date(p.endDate).toLocaleDateString('en-IN') : '—'} />
+              <Fact label="Health" value={p.health ? p.health.toUpperCase() : '—'} tone={p.health === 'red' ? 'bad' : p.health === 'amber' ? 'warn' : 'ok'} />
             </div>
 
             <div className="border-t px-4 py-3" style={{ borderColor: 'var(--line-2)' }}>
@@ -140,6 +158,32 @@ export default function ProjectDetailPage() {
                 </span>
               </div>
             </div>
+          </Panel>
+
+          {/* ── Team ───────────────────────────────────────────────── */}
+          <Panel
+            title="Team on this project"
+            sub={team.length ? `${team.length} member${team.length === 1 ? '' : 's'}` : 'No team assigned — its chains stall'}
+            bodyless
+          >
+            <DataTable
+              columns={[
+                { key: 'member', label: 'Member' },
+                { key: 'role', label: 'Role on project' },
+                { key: 'added', label: 'Added', align: 'right' },
+              ]}
+              empty="No team. Assign members under Admin → Project teams."
+              rows={team.map((m) => [
+                <span key="n">
+                  <span className="font-semibold">{m.name}</span>
+                  <span className="block text-[11.5px]" style={{ color: 'var(--muted)' }}>{m.email}</span>
+                </span>,
+                <Chip key="r" tone="info">{m.roleLabel}</Chip>,
+                <span key="a" className="num text-[12px]" style={{ color: 'var(--muted)' }}>
+                  {new Date(m.addedAt).toLocaleDateString('en-IN')}
+                </span>,
+              ])}
+            />
           </Panel>
 
           {/* ── Performance + commercial ───────────────────────────── */}
@@ -218,28 +262,6 @@ export default function ProjectDetailPage() {
                 <Chip key="st" tone="mute">{s.status}</Chip>,
                 <span key="pr" className="num">{s.progress}%</span>,
                 <span key="v" className="num">{s.contractValue.toLocaleString('en-IN')}</span>,
-              ])}
-            />
-          </Panel>
-
-          {/* ── Team ───────────────────────────────────────────────── */}
-          <Panel title="Team" sub={team.length ? `${team.length} member${team.length === 1 ? '' : 's'}` : 'No team assigned — its chains stall'} bodyless>
-            <DataTable
-              columns={[
-                { key: 'member', label: 'Member' },
-                { key: 'role', label: 'Role on project' },
-                { key: 'added', label: 'Added', align: 'right' },
-              ]}
-              empty="No team. Assign members under Admin → Project teams."
-              rows={team.map((m) => [
-                <span key="n">
-                  <span className="font-semibold">{m.name}</span>
-                  <span className="block text-[11.5px]" style={{ color: 'var(--muted)' }}>{m.email}</span>
-                </span>,
-                <Chip key="r" tone="info">{m.roleLabel}</Chip>,
-                <span key="a" className="num text-[12px]" style={{ color: 'var(--muted)' }}>
-                  {new Date(m.addedAt).toLocaleDateString('en-IN')}
-                </span>,
               ])}
             />
           </Panel>

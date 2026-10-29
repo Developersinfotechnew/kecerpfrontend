@@ -898,6 +898,7 @@ export function Gantt({
   rows,
   months,
   todayPct = 56,
+  actual = false,
 }: {
   rows: {
     label: string;
@@ -906,9 +907,13 @@ export function Gantt({
     widthPct: number;
     tone?: 'ok' | 'warn' | 'bad' | 'mute' | 'crit';
     critical?: boolean;
+    /** Completion percent of this activity; drawn as an overlay when `actual` is on. */
+    progress?: number;
   }[];
   months: string[];
   todayPct?: number;
+  /** Draw the progress-to-date overlay on every row that has one. */
+  actual?: boolean;
 }) {
   const barColor = (t?: string) =>
     t === 'crit'
@@ -965,7 +970,7 @@ export function Gantt({
             ) : null}
           </div>
           <div
-            className="relative h-[38px] max-[1100px]:hidden"
+            className="relative h-[38px] overflow-hidden max-[1100px]:hidden"
             style={{ borderLeft: '1px solid var(--line-2)' }}
           >
             <div
@@ -975,12 +980,27 @@ export function Gantt({
             <div
               className="absolute top-[11px] h-4 rounded-[3px]"
               style={{
-                left: `${r.startPct}%`,
-                width: `${r.widthPct}%`,
+                left: `${Math.min(100, r.startPct)}%`,
+                width: `${Math.max(0, Math.min(r.widthPct, 100 - Math.min(100, r.startPct)))}%`,
                 background: barColor(r.tone),
                 opacity: 0.9,
               }}
             />
+            {/* Actual progress: a darker fill of the same bar, up to completion */}
+            {actual && typeof r.progress === 'number' && r.progress > 0 ? (
+              <div
+                className="absolute top-[11px] h-4 rounded-[3px]"
+                style={{
+                  left: `${Math.min(100, r.startPct)}%`,
+                  width: `${Math.max(
+                    0,
+                    Math.min(r.widthPct, 100 - Math.min(100, r.startPct)) *
+                      (Math.min(100, r.progress) / 100),
+                  )}%`,
+                  background: 'rgba(0,0,0,0.28)',
+                }}
+              />
+            ) : null}
           </div>
         </div>
       ))}
