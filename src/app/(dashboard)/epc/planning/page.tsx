@@ -25,13 +25,23 @@ export default function EpcPlanningPage() {
   // completion on top of the same bar, so plan vs done read at a glance.
   const [view, setView] = useState<'baseline' | 'actual'>('baseline');
 
+  // A rejected fetch ("Failed to fetch") means the API itself was
+  // unreachable, not that the schedule is wrong. Naming that plainly — with
+  // a retry — beats the browser's raw TypeError on screen.
+  function describeLoadError(err: unknown, fallback: string): string {
+    const message = err instanceof Error ? err.message : String(err);
+    return message === 'Failed to fetch'
+      ? `Backend unreachable (${fallback}). The API service may be down or restarting — retry once it is back.`
+      : message;
+  }
+
   const loadCpm = useCallback(async () => {
     if (!p) return;
     setCpmError(null);
     try {
       setCpm(await wbsCpm.criticalPath(p.id));
     } catch (err) {
-      setCpmError(err instanceof Error ? err.message : 'Could not compute critical path');
+      setCpmError(describeLoadError(err, 'Could not compute critical path'));
       setCpm(null);
     }
   }, [p]);
@@ -49,7 +59,7 @@ export default function EpcPlanningPage() {
       setTaskType(type);
       setTasks(page.items);
     } catch (err) {
-      setTaskError(err instanceof Error ? err.message : 'Could not load tasks');
+      setTaskError(describeLoadError(err, 'Could not load tasks'));
     }
   }, [p]);
 
@@ -81,9 +91,12 @@ export default function EpcPlanningPage() {
       />
 
       {cpmError ? (
-        <Notice>
-          Critical path could not be computed: <strong>{cpmError}</strong>
-        </Notice>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Notice>
+            Critical path could not be computed: <strong>{cpmError}</strong>
+          </Notice>
+          <Button onClick={() => void loadCpm()}>Retry</Button>
+        </div>
       ) : null}
 
       {cpm && cpm.activities.length === 0 ? (
@@ -216,9 +229,12 @@ export default function EpcPlanningPage() {
         bodyless
       >
         {taskError ? (
-          <p className="m-0 p-4 text-[12.5px]" style={{ color: 'var(--red)' }}>
-            {taskError}
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2 p-4">
+            <p className="m-0 text-[12.5px]" style={{ color: 'var(--red)' }}>
+              {taskError}
+            </p>
+            <Button onClick={() => void loadTasks()}>Retry</Button>
+          </div>
         ) : (
           <DataTable
             columns={

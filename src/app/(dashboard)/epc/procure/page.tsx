@@ -279,20 +279,29 @@ export default function EpcProcurePage() {
             <DataTable
               columns={[
                 { key: 'v', label: 'Vendor' },
+                { key: 'qual', label: 'Quality %', align: 'right' },
                 { key: 'ontime', label: 'On-time %', align: 'right' },
-                { key: 'rej', label: 'Rejection %', align: 'right' },
-                { key: 'resp', label: 'Responsiveness', align: 'right' },
+                { key: 'fulfil', label: 'Fulfilment %', align: 'right' },
+                { key: 'comp', label: 'Compliance %', align: 'right' },
                 { key: 'score', label: 'Overall', align: 'right' },
-                { key: 'grade', label: 'Grade', align: 'right' },
+                { key: 'grade', label: 'Rating band', align: 'right' },
               ]}
               rows={scores.scored.map((r) => [
                 r.vendor,
+                <span key="q" className="num">{r.qualityScore}%</span>,
                 <span key="o" className="num">{r.onTimeDeliveryPct}%</span>,
-                <span key="r" className="num">{r.qualityRejectionPct}%</span>,
-                <span key="s" className="num">{r.responsivenessScore.toFixed(1)}</span>,
+                <span key="f" className="num">{r.orderFulfilment}%</span>,
+                <span key="c" className="num">{r.complianceScore}%</span>,
                 <span key="sc" className="num">{r.overallScore}</span>,
-                <Chip key="g" tone={r.grade === 'A' ? 'ok' : r.grade === 'B' ? 'info' : r.grade === 'C' ? 'warn' : 'bad'}>
-                  {r.grade}
+                <Chip
+                  key="g"
+                  tone={
+                    r.grade === 'Excellent' ? 'ok' : r.grade === 'Good'
+                      ? 'info' : r.grade === 'Average' ? 'warn'
+                      : r.grade === 'Poor' ? 'bad' : 'bad'
+                  }
+                >
+                  {r.grade} · {r.classification}
                 </Chip>,
               ])}
             />

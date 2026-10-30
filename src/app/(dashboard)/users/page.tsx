@@ -817,6 +817,16 @@ interface ModuleAccessDialogProps {
 }
 
 function ModuleAccessDialog({ user, draft, setDraft, onCancel, onSubmit }: ModuleAccessDialogProps) {
+  // The full module catalogue from the backend; the flat MODULE_KEYS list is
+  // only a fallback for when the fetch fails.
+  const [moduleKeys, setModuleKeys] = useState<string[]>([...MODULE_KEYS]);
+  useEffect(() => {
+    admin
+      .permissions()
+      .then((m) => setModuleKeys(m.modules))
+      .catch(() => {});
+  }, []);
+
   function setLevel(mod: string, lvl: 'view' | 'add' | 'edit' | 'full'): void {
     setDraft({ ...draft, [mod]: lvl });
   }
@@ -861,7 +871,7 @@ function ModuleAccessDialog({ user, draft, setDraft, onCancel, onSubmit }: Modul
         </div>
         <div className="p-4">
           <div className="flex flex-col gap-2">
-            {MODULE_KEYS.map((mod) => {
+            {moduleKeys.map((mod) => {
               const current = draft[mod] ?? '';
               return (
                 <div

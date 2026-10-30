@@ -1,14 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useParams } from 'next/navigation';
 
 import { Button, Chip, DataTable, Notice, PageHead, Panel } from '@/components/ui';
 import { RecordForm } from '@/components/RecordForm';
 import { useProjectData } from '@/lib/project-data';
 import { useSession } from '@/app/session';
-import { records, projects, admin, type ProjectOption } from '@/lib/services';
+import { records, projects, admin, approvals, type ProjectOption, type RecordApprovalSummary, type RecordApprovalState } from '@/lib/services';
 import type { RecordRow, RecordType } from '@/lib/types';
+import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
 
 /**
  * Generic register screen (client component).
@@ -46,6 +47,43 @@ export default function RegisterBody() {
   // DSRs. The prefilled values sit here and are handed to the form on open.
   const [prefill, setPrefill] = useState<Record<string, unknown> | undefined>(undefined);
   const [prefillBusy, setPrefillBusy] = useState(false);
+  // Live chain position per row ref: who each approval is with now, who is
+  // next. Shown as an Approval column; the detail modal fetches the full
+  // state for one row on click.
+  const [approvalStates, setApprovalStates] = useState<Record<string, RecordApprovalSummary>>({});
+  const [detail, setDetail] = useState<RecordApprovalState | null>(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+
+  // Bulk live chain position for every row in the register. Registers that
+  // never open a chain come back empty, so no column is shown for them.
+  useEffect(() => {
+    if (rows.length === 0) {
+      setApprovalStates({});
+      return;
+    }
+    let cancelled = false;
+    approvals
+      .recordStates(key, rows.map((r) => r.ref))
+      .then((states) => {
+        if (!cancelled) setApprovalStates(states ?? {});
+      })
+      .catch(() => {
+        if (!cancelled) setApprovalStates({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [key, rows]);
+
+  async function openDetail(ref: string): Promise<void> {
+    setDetailBusy(true);
+    try {
+      const state = await approvals.recordState(key, ref);
+      if (state) setDetail(state);
+    } finally {
+      setDetailBusy(false);
+    }
+  }
 
   const isClientApprovals = key === 'client_approvals';
   const isDpr = key === 'pm_daily_progress';
@@ -175,6 +213,37 @@ export default function RegisterBody() {
 
   const titleField = type?.titleField ?? '';
 
+  // The Approval column only shows for a register that has live chain state
+  // on at least one row; registers that never open a chain stay clean.
+  const hasApprovals = Object.keys(approvalStates ?? {}).length > 0;
+
+  function approvalCell(r: RecordRow): ReactNode {
+    const s = approvalStates[r.ref];
+    if (!s) return '—';
+    const word = s.status === 'pending' ? (s.awaitingUser ? 'Returned' : 'Pending') : s.status;
+    const pos =
+      s.status === 'pending' && s.nextStep
+        ? `step ${s.nextStep.order} of ${s.totalSteps} · ${s.nextStep.name}`
+        : s.status === 'pending'
+          ? `step ${s.currentStep} of ${s.totalSteps}`
+          : word;
+    const who = s.nextOwners.length > 0 ? s.nextOwners.join(', ') : '';
+    return (
+      <span className="flex items-center gap-2">
+        <Chip tone={s.status === 'approved' ? 'ok' : s.status === 'rejected' ? 'bad' : 'warn'}>
+          {word}
+        </Chip>
+        <span className="text-[11.5px]" style={{ color: 'var(--muted)' }}>
+          {pos}
+          {who ? ` · ${who}` : ''}
+        </span>
+        <Button onClick={() => void openDetail(r.ref)} disabled={detailBusy}>
+          Details
+        </Button>
+      </span>
+    );
+  }
+
   if (sessionLoading) {
     return <Notice>Loading session…</Notice>;
   }
@@ -285,24 +354,37 @@ export default function RegisterBody() {
       <Panel title="Records" bodyless>
         <DataTable
           columns={
-            columns.length > 0
-              ? columns
-              : [{ key: titleField, label: type?.label ?? 'Record' }]
+            [
+              ...(columns.length > 0
+                ? columns
+                : [{ key: titleField, label: type?.label ?? 'Record' }]),
+              ...(hasApprovals ? [{ key: '__approval', label: 'Approval', align: 'left' as const }] : []),
+            ]
           }
           rows={
             filteredRows.length === 0
-              ? [['No entries yet. Use Add entry to create the first one.']]
+              ? [
+                  [
+                    ...(columns.length > 0 ? columns : [{ key: titleField, label: '' }]).map(() => '—'),
+                    ...(hasApprovals ? ['—'] : []),
+                  ],
+                ]
               : filteredRows.map((r) =>
-                  (columns.length > 0 ? columns : [{ key: titleField, label: '' }]).map((c) => {
-                    const value = r.data[c.key];
-                    if (value === undefined || value === null || value === '') return '—';
-                    if (typeof value === 'number') return value.toLocaleString();
-                    return String(value);
-                  }),
+                  [
+                    ...(columns.length > 0 ? columns : [{ key: titleField, label: '' }]).map((c) => {
+                      const value = r.data[c.key];
+                      if (value === undefined || value === null || value === '') return '—';
+                      if (typeof value === 'number') return value.toLocaleString();
+                      return String(value);
+                    }),
+                    ...(hasApprovals ? [approvalCell(r)] : []),
+                  ],
                 )
           }
         />
       </Panel>
+
+      {detail ? <ApprovalDetailsModal state={detail} onClose={() => setDetail(null)} /> : null}
 
       {creating && type ? (
         <RecordForm

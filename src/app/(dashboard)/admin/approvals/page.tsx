@@ -392,51 +392,87 @@ const SERVICE_OPTIONS = [
   { key: 'om', label: 'O&M' },
 ] as const;
 
+/**
+ * One access row in the dialog.
+ *
+ * The engine grants access per module, and many sidebar screens share one
+ * module. So one row shows per module: the first sidebar screen's exact name
+ * as the label, and the remaining screens the module gates as sub-text.
+ * Toggling the row sets that one module; screens sharing it move together,
+ * which is what the engine actually does.
+ */
+interface AccessRow {
+  /** Module code the row gates. */
+  mod: string;
+  /** Sidebar label shown (first screen that uses this module). */
+  label: string;
+  /** Other sidebar screens that share the module. */
+  also: string[];
+}
+
 interface NavModuleGroup {
   suite: string;
   group: string;
-  /** module code → nav label (first entry wins for display) */
-  modules: Record<string, string>;
+  rows: AccessRow[];
 }
 
 /**
- * Flatten the nav entries into (suite, group, module) triples.
- * Multiple nav entries may share the same module; dedupe by module code.
+ * Flatten the active nav entries into per-suite groups of module rows.
+ * Each module gets one row: the first sidebar screen's label, the rest listed
+ * in `also`. Inactive nav rows are skipped, matching the sidebar.
  */
 function buildModuleGroups(
   navEntries: import('@/lib/services').NavEntryView[],
 ): Record<string, NavModuleGroup[]> {
   const bySuite: Record<string, NavModuleGroup[]> = {};
-  for (const entry of navEntries) {
-    if (entry.suite === 'backoffice') continue; // backoffice handled separately
+  const active = [...navEntries].filter((e) => e.isActive).sort((a, b) => a.sortOrder - b.sortOrder);
+  for (const entry of active) {
     if (!bySuite[entry.suite]) bySuite[entry.suite] = [];
     const groups = bySuite[entry.suite];
     let g = groups.find((x) => x.group === entry.group);
     if (!g) {
-      g = { suite: entry.suite, group: entry.group, modules: {} };
+      g = { suite: entry.suite, group: entry.group, rows: [] };
       groups.push(g);
     }
     for (const mod of entry.modules) {
-      if (!g.modules[mod]) g.modules[mod] = entry.label;
+      const existing = g.rows.find((r) => r.mod === mod);
+      if (existing) existing.also.push(entry.label);
+      else g.rows.push({ mod, label: entry.label, also: [] });
     }
   }
   return bySuite;
 }
 
-/** Back-office modules that don't appear in the nav entries above. */
-const BACKOFFICE_MODULES: NavModuleGroup = {
-  suite: 'backoffice',
-  group: 'General',
-  modules: {
-    lead: 'Leads',
-    contract: 'Contracts',
-    serviceorder: 'Service orders',
-    hr: 'People',
-    expense: 'Expense claims',
-    task: 'Tasks',
-    marketing: 'Marketing',
-  },
-};
+/**
+ * Add the backend catalogue's modules that no sidebar row covers yet, one
+ * row per module under an "Other" group in its suite, with the backend's
+ * title-cased label.
+ */
+function withCatalogue(
+  groups: Record<string, NavModuleGroup[]>,
+  moduleSuite: Record<string, string> | null,
+  moduleLabels: Record<string, string> | null,
+): Record<string, NavModuleGroup[]> {
+  if (!moduleSuite) return groups;
+  const next: Record<string, NavModuleGroup[]> = { ...groups };
+  for (const [mod, suite] of Object.entries(moduleSuite)) {
+    const suiteGroups = next[suite] ?? [];
+    const inNav = suiteGroups.some((g) => g.rows.some((r) => r.mod === mod));
+    if (inNav) continue;
+    let other = suiteGroups.find((g) => g.group === 'Other');
+    if (!other) {
+      other = { suite, group: 'Other', rows: [] };
+      suiteGroups.push(other);
+      next[suite] = suiteGroups;
+    }
+    other.rows.push({
+      mod,
+      label: moduleLabels?.[mod] ?? mod.charAt(0).toUpperCase() + mod.slice(1),
+      also: [],
+    });
+  }
+  return next;
+}
 
 interface AccessUser {
   id: string;
@@ -462,13 +498,28 @@ function ModuleAccessDialog({
     new Set(user.services ?? []),
   );
   const [navEntries, setNavEntries] = useState<import('@/lib/services').NavEntryView[]>([]);
+  const [moduleSuite, setModuleSuite] = useState<Record<string, string> | null>(null);
+  const [moduleLabels, setModuleLabels] = useState<Record<string, string> | null>(null);
   const [loadingNav, setLoadingNav] = useState(true);
 
   useEffect(() => {
-    admin.navEntries().then(setNavEntries).catch(() => {}).finally(() => setLoadingNav(false));
+    admin
+      .navEntries()
+      .then(setNavEntries)
+      .catch(() => {})
+      .finally(() => setLoadingNav(false));
+    // The module catalogue is the complete module list; the dialog must show
+    // every module in its suite, not only the ones with an active nav row.
+    admin
+      .permissions()
+      .then((m) => {
+        setModuleSuite(m.moduleSuite ?? null);
+        setModuleLabels(m.moduleLabels ?? null);
+      })
+      .catch(() => {});
   }, []);
 
-  const moduleGroups = buildModuleGroups(navEntries);
+  const moduleGroups = withCatalogue(buildModuleGroups(navEntries), moduleSuite, moduleLabels);
 
   function setLevel(mod: string, lvl: string): void {
     setLevels((prev) => ({ ...prev, [mod]: lvl }));
@@ -487,9 +538,13 @@ function ModuleAccessDialog({
     else setLevel(mod, 'view');
   }
 
-  /** Render one module row: checkbox + level selector. */
-  function ModuleRow({ mod, label }: { mod: string; label: string }) {
-    const current = levels[mod] ?? '';
+  /**
+   * Render one module row: checkbox + level selector. The label is the first
+   * sidebar screen that gates on this module; the other screens sharing it
+   * are listed as sub-text, so the user sees exactly what one toggle opens.
+   */
+  function ModuleRow({ row }: { row: AccessRow }) {
+    const current = levels[row.mod] ?? '';
     return (
       <div
         className="flex items-center gap-2 rounded px-2 py-1.5"
@@ -498,14 +553,21 @@ function ModuleAccessDialog({
         <input
           type="checkbox"
           checked={!!current}
-          onChange={() => toggleModule(mod, current)}
+          onChange={() => toggleModule(row.mod, current)}
           className="h-4 w-4 flex-none"
         />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{label}</span>
+        <span className="min-w-0 flex-1 text-[12.5px] font-medium">
+          {row.label}
+          {row.also.length > 0 ? (
+            <span className="ml-1 font-normal" style={{ color: 'var(--muted)' }}>
+              +{row.also.length} more ({row.also.join(', ')})
+            </span>
+          ) : null}
+        </span>
         {current ? (
           <select
             value={current}
-            onChange={(e) => setLevel(mod, e.target.value)}
+            onChange={(e) => setLevel(row.mod, e.target.value)}
             className="w-[110px] flex-none rounded px-1.5 py-0.5 text-[11.5px]"
             style={{ border: '1px solid var(--line)', background: '#fff' }}
           >
@@ -522,8 +584,9 @@ function ModuleAccessDialog({
     );
   }
 
-  /** Render a group block with its modules. */
-  function GroupBlock({ group, modules }: { group: string; modules: Record<string, string> }) {
+  /** Render a group block with its module rows. */
+  function GroupBlock({ group, rows }: { group: string; rows: AccessRow[] }) {
+    const groupMods = rows.map((r) => r.mod);
     return (
       <div className="rounded p-2" style={{ background: 'var(--panel-2, #f9fafb)', border: '1px solid var(--line)' }}>
         <div className="mb-1.5 flex items-center justify-between">
@@ -534,22 +597,22 @@ function ModuleAccessDialog({
             type="button"
             onClick={() => {
               // Toggle all modules in this group
-              const allOn = Object.keys(modules).every((m) => levels[m]);
+              const allOn = groupMods.every((m) => levels[m]);
               if (allOn) {
-                for (const m of Object.keys(modules)) clearModule(m);
+                for (const m of groupMods) clearModule(m);
               } else {
-                for (const m of Object.keys(modules)) setLevel(m, 'view');
+                for (const m of groupMods) setLevel(m, 'view');
               }
             }}
             className="text-[11px]"
             style={{ color: 'var(--blue)' }}
           >
-            {Object.keys(modules).every((m) => levels[m]) ? 'clear all' : 'view all'}
+            {groupMods.every((m) => levels[m]) ? 'clear all' : 'view all'}
           </button>
         </div>
         <div className="grid gap-1">
-          {Object.entries(modules).map(([mod, label]) => (
-            <ModuleRow key={mod} mod={mod} label={label} />
+          {rows.map((row) => (
+            <ModuleRow key={row.mod} row={row} />
           ))}
         </div>
       </div>
@@ -557,11 +620,7 @@ function ModuleAccessDialog({
   }
 
   const activeGroups: NavModuleGroup[] =
-    activeTab === 'backoffice'
-      ? [BACKOFFICE_MODULES]
-      : activeTab === 'services'
-        ? []
-        : moduleGroups[activeTab] ?? [];
+    activeTab === 'services' ? [] : moduleGroups[activeTab] ?? [];
 
   return (
     <div
@@ -648,7 +707,7 @@ function ModuleAccessDialog({
           ) : (
             <div className="grid gap-3">
               {activeGroups.map((g) => (
-                <GroupBlock key={g.group} group={g.group} modules={g.modules} />
+                <GroupBlock key={g.group} group={g.group} rows={g.rows} />
               ))}
             </div>
           )}
@@ -665,15 +724,14 @@ function ModuleAccessDialog({
           onClick={() => {
             // If the admin set any module that lives in the 'shared' suite
             // but did not explicitly tick 'Head Office' in the Services tab, add
-            // 'shared' to the services list automatically.
-            const SHARED_MODULES = new Set([
-              'admin', 'project', 'workflow', 'hr', 'payroll',
-              'task', 'expense', 'notification', 'calculator',
-              'serviceorder', 'contract', 'lead',
-            ]);
+            // 'shared' to the services list automatically. The suite map comes
+            // from the backend catalogue, not a hardcoded list.
+            const sharedMods = new Set(
+              Object.entries(moduleSuite ?? {}).filter(([, s]) => s === 'shared').map(([m]) => m),
+            );
             const finalServices = new Set(selectedServices);
             for (const mod of Object.keys(levels)) {
-              if (SHARED_MODULES.has(mod)) {
+              if (sharedMods.has(mod)) {
                 finalServices.add('shared');
                 break;
               }

@@ -80,6 +80,7 @@ export interface ProjectOption {
   contractNo?: string;
   currency?: string;
   projectType?: string;
+  scope?: string;
   targetMargin?: number;
   contractValue: number;
   budget: number;
@@ -519,6 +520,10 @@ export interface PermissionMatrix {
   modules: string[];
   actions: string[];
   permissions: string[];
+  /** Suite each module belongs to — drives the suite tabs in the access dialogs. */
+  moduleSuite?: Record<string, Suite>;
+  /** Title-cased labels for module keys, for modules with no nav row. */
+  moduleLabels?: Record<string, string>;
 }
 
 export type Suite = 'backoffice' | 'epc' | 'pmc' | 'eptp' | 'om' | 'shared';
@@ -608,6 +613,8 @@ export interface CreateProjectInput {
   targetMargin?: number;
   /** EPC / CBG / Plant / other — the PDF "Project group" field. */
   projectType?: string;
+  /** Client batch: the scope of the project, in the client's words. */
+  scope?: string;
   /** Project currency; defaults to INR on the backend. */
   currency?: string;
   /** Schedule baseline, separate from the contract dates. */
@@ -648,6 +655,30 @@ export const approvals = {
     awaitingUser: string | null;
   }> {
     return api(`/workflow/instances/${id}/trail`);
+  },
+
+  /**
+   * Live approval state of one record: the open chain, its current step, who
+   * is next and what each earlier step decided. null when no chain ever
+   * opened on the record.
+   */
+  async recordState(entity: string, ref: string): Promise<RecordApprovalState | null> {
+    return api<RecordApprovalState | null>(
+      `/workflow/records/${encodeURIComponent(entity)}/${encodeURIComponent(ref)}`,
+    );
+  },
+
+  /**
+   * Bulk live chain position for a register's rows: ref → status + current
+   * step + who owns the next. Empty object when none of the rows has a
+   * chain.
+   */
+  async recordStates(entity: string, refs: string[]): Promise<Record<string, RecordApprovalSummary>> {
+    const qs = new URLSearchParams();
+    qs.set('refs', refs.slice(0, 200).join(','));
+    return api<Record<string, RecordApprovalSummary>>(
+      `/workflow/records/${encodeURIComponent(entity)}/states?${qs.toString()}`,
+    );
   },
 
   /** Documents returned to this user, waiting for resubmission. */
@@ -803,6 +834,42 @@ export interface ApprovalInstanceAction {
   action: 'approved' | 'rejected' | 'returned' | 'resubmitted';
   remark: string;
   at: string;
+}
+
+/** One register row's live chain position, from the bulk states endpoint. */
+export interface RecordApprovalSummary {
+  status: string;
+  awaitingUser: boolean;
+  currentStep: number;
+  totalSteps: number;
+  nextStep: { order: number; name: string; role: string } | null;
+  nextOwners: string[];
+}
+
+/**
+ * Live approval state of one record, from GET /workflow/records/:entity/:ref.
+ * Drives the register's "where is this approval" detail modal.
+ */
+export interface RecordApprovalState {
+  instanceId: string;
+  status: 'pending' | 'rejected' | 'approved' | 'cancelled';
+  awaitingUser: string | null;
+  currentStep: number;
+  totalSteps: number;
+  workflowKey: string;
+  workflowLabel: string;
+  amount: number;
+  chain: Array<{ order: number; name: string; role: string; state: 'done' | 'current' | 'pending' }>;
+  nextStep: { order: number; name: string; role: string } | null;
+  nextOwners: Array<{ name: string; email: string }>;
+  actions: Array<ApprovalInstanceAction>;
+  record: {
+    ref: string;
+    projectId: string | null;
+    raisedByName: string;
+    raisedAt: string | null;
+    fields: Array<{ label: string; value: string }>;
+  };
 }
 
 /** One item in the resubmission queue: a document an approver sent back. */
@@ -966,11 +1033,22 @@ export const wbsCpm = {
 
 export interface VendorScoreRow {
   vendor: string;
+  qualityScore: number;
   onTimeDeliveryPct: number;
-  qualityRejectionPct: number;
-  responsivenessScore: number;
+  costCompetitiveness: number;
+  orderFulfilment: number;
+  responsiveness: number;
+  complianceScore: number;
+  servicePerformance: number;
+  documentationAccuracy: number;
+  leadTimeDays: number;
+  urgentFulfilmentPct: number;
+  paymentTerms: string;
+  riskScore: string;
   overallScore: number;
-  grade: 'A' | 'B' | 'C' | 'D';
+  grade: 'Excellent' | 'Good' | 'Average' | 'Poor' | 'Critical';
+  classification: string;
+  pendingSources: string[];
 }
 
 export interface VendorScoreResult {

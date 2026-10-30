@@ -15,11 +15,15 @@ import type { RecordRow, RecordType } from '@/lib/types';
 import { RecordForm } from '@/components/RecordForm';
 import { Button, Chip, DataTable, Notice, PageHead, Panel, VitalsRail } from '@/components/ui';
 import { StepTracker } from '@/components/StepTracker';
+import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
 
 interface QueueItem {
   id: string;
   entity: string;
   entityId: string;
+  /** The record's own title (register titleField). Empty when the register
+   * has no titleField or the row no longer exists. */
+  title?: string;
   amount: number;
   priority: Priority;
   projectId?: string;
@@ -93,6 +97,7 @@ export default function ApprovalsPage() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyTab, setHistoryTab] = useState<HistoryStatus | 'all'>('all');
   const [histTrackId, setHistTrackId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<import('@/lib/services').RecordApprovalState | null>(null);
   const [projectNames, setProjectNames] = useState<Map<string, string>>(new Map());
 
   const loadHistory = useCallback(async (tab: HistoryStatus | 'all') => {
@@ -254,7 +259,12 @@ export default function ApprovalsPage() {
                 {/* Card header: what it is, who asked, how much, how urgent */}
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
                   <div>
-                    <span className="num text-[13px] font-semibold">{item.entityId}</span>
+                    <span className="text-[13px] font-semibold">
+                      {item.title ? `${item.title}` : item.entityId}
+                    </span>
+                    <span className="ml-2 num text-[11.5px]" style={{ color: 'var(--muted)' }}>
+                      {item.entityId}
+                    </span>
                     <span className="ml-2 text-[11.5px]" style={{ color: 'var(--muted)' }}>
                       {item.entity.replaceAll('_', ' ')}
                     </span>
@@ -275,6 +285,14 @@ export default function ApprovalsPage() {
                       month: 'short',
                     })}
                   </span>
+                  <Button
+                    onClick={async () => {
+                      const state = await approvals.recordState(item.entity, item.entityId);
+                      setDetail(state);
+                    }}
+                  >
+                    Details
+                  </Button>
                 </div>
 
                 {/* The chain position */}
@@ -582,6 +600,10 @@ export default function ApprovalsPage() {
         </div>
       </Panel>
 
+      {detail ? (
+        <ApprovalDetailsModal state={detail} onClose={() => setDetail(null)} />
+      ) : null}
+
       {editing ? (
         <RecordForm
           type={editing.type}
@@ -597,7 +619,6 @@ export default function ApprovalsPage() {
     </>
   );
 }
-
 /** Colour-coded status chip for the history view. */
 function StatusChip({ status }: { status: HistoryStatus }) {
   const tone: Record<HistoryStatus, 'ok' | 'warn' | 'bad' | 'info' | 'mute'> = {

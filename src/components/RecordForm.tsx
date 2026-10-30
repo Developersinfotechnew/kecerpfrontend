@@ -1,8 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import { projects as projectService, uploads as uploadService } from '@/lib/services';
+import { projects as projectService, records, uploads as uploadService } from '@/lib/services';
 import type { RecordField, RecordRow, RecordType } from '@/lib/types';
 import { Button } from '@/components/ui';
 
@@ -44,8 +44,44 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
   /** Files chosen but not yet uploaded, keyed by field key. */
   const [pending, setPending] = useState<Record<string, File>>({});
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
+  /** Live select options, keyed by the source register key a field pulls from. */
+  const [liveOptions, setLiveOptions] = useState<Record<string, string[]>>({});
 
   const fields = [...type.fields].sort((a, b) => a.sortOrder - b.sortOrder);
+
+  // Fields that declare optionsFrom (e.g. the GRN vendor list follows the
+  // Vendor master) load their options live: one register fetch per source,
+  // each rendered through its own title field. A failure leaves the field
+  // with its static options, so the form still works.
+  const sourceKeys = [...new Set(fields.filter((f) => f.optionsFrom).map((f) => f.optionsFrom as string))];
+  useEffect(() => {
+    let cancelled = false;
+    sourceKeys.forEach((key) => {
+      // Type first (for its title field), then the rows. One source = one
+      // option list; rows are read in title-field order, de-duplicated.
+      void (async () => {
+        try {
+          const [t, page] = await Promise.all([
+            records.type(key),
+            records.list(key, { limit: 500 }),
+          ]);
+          if (cancelled) return;
+          const opts = page.items
+            .map((r) => String(r.data[t.titleField] ?? r.ref))
+            .filter((v) => v !== '')
+            .map((v) => v.trim())
+            .filter((v, i, all) => all.indexOf(v) === i);
+          setLiveOptions((prev) => ({ ...prev, [key]: opts }));
+        } catch {
+          // A failed source fetch leaves the field on its static options.
+        }
+      })();
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type.key, sourceKeys.length]);
 
   // Transaction registers that open an approval chain must be bound to a
   // project. Without one, the chain has no projectId, the team gate can't
@@ -227,7 +263,11 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
           {fields.map((f) => (
             <Field key={f.key} label={f.label} required={f.required}>
               <Input
-                field={f}
+                field={
+                  f.optionsFrom
+                    ? { ...f, options: [...new Set([...(liveOptions[f.optionsFrom] ?? []), ...f.options])] }
+                    : f
+                }
                 value={values[f.key]}
                 onChange={(v) => set(f.key, v)}
                 pending={pending[f.key]}
@@ -312,6 +352,13 @@ function Input({ field, value, onChange, pending, uploading, onPick, onClear }: 
 
     case 'select':
     case 'status':
+      // A live-options field (optionsFrom) renders as a dropdown combobox:
+      // clicking the field opens the source register's values as a panel,
+      // typing filters the list, and a free value stays allowed, so an empty
+      // vendor master never blocks the form with a dead dropdown.
+      if (field.optionsFrom) {
+        return <ComboSelect key={field.key} options={field.options} value={str} onChange={onChange} />;
+      }
       return (
         <select
           value={str}
@@ -395,6 +442,104 @@ function Input({ field, value, onChange, pending, uploading, onPick, onClear }: 
         />
       );
   }
+}
+
+/**
+ * Click-to-open dropdown combobox for live-options fields (optionsFrom).
+ *
+ * Clicking (or focusing) the input opens a panel listing the source
+ * register's values; typing filters it. Free text stays allowed: a value
+ * that matches no option is kept as-is, so a vendor master without rows
+ * never blocks the form.
+ */
+function ComboSelect({
+  options,
+  value,
+  onChange,
+}: {
+  options: string[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [initial, setInitial] = useState('');
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // While the text is untouched, show every option. Once the user types,
+  // the list narrows to matches.
+  const visible = options.filter((o) =>
+    query === initial ? true : o.toLowerCase().includes(query.toLowerCase())
+  );
+
+  // A click anywhere in the panel keeps it open; a click outside closes it.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  return (
+    <div ref={rootRef} style={{ position: 'relative' }}>
+      <input
+        value={open ? query : value}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => {
+          setQuery(value);
+          setInitial(value);
+          setOpen(true);
+        }}
+        placeholder={options.length === 0 ? 'Type a name or pick…' : 'Pick…'}
+        className={INPUT_CLASS}
+        style={INPUT_STYLE}
+      />
+      {open && visible.length > 0 ? (
+        <div
+          style={{
+            position: 'absolute',
+            top: '100%',
+            left: 0,
+            right: 0,
+            zIndex: 30,
+            margin: 0,
+            maxHeight: 220,
+            overflowY: 'auto',
+            background: '#fff',
+            border: '1px solid var(--line)',
+            borderRadius: 6,
+            boxShadow: '0 6px 16px rgba(0, 0, 0, 0.12)',
+          }}
+        >
+          {visible.map((o) => (
+            <div
+              key={o}
+              role="option"
+              aria-selected={o === value}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onChange(o);
+                setOpen(false);
+              }}
+              style={{
+                padding: '6px 10px',
+                fontSize: 13,
+                cursor: 'pointer',
+                background: o === value ? 'var(--accent-soft, #eef1f7)' : '#fff',
+              }}
+            >
+              {o}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 /**

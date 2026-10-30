@@ -80,6 +80,12 @@ export interface RecordField {
   type: FieldType;
   required: boolean;
   options: string[];
+  /**
+   * Live option source: a register key. When set on a select/status field the
+   * form feeds the dropdown from that register's title values instead of
+   * static options — e.g. GRN vendor follows the Vendor master.
+   */
+  optionsFrom?: string;
   refType: RefTarget | '';
   align: 'left' | 'right';
   listColumn: boolean;

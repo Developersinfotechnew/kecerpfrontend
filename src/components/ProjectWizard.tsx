@@ -38,6 +38,7 @@ interface WizardDraft {
   capacityTpd: string;
   projectType: string;
   currency: string;
+  scope: string;
   baselineStart: string;
   baselineFinish: string;
   enabledStages: string[];
@@ -60,6 +61,7 @@ const EMPTY: WizardDraft = {
   capacityTpd: '',
   projectType: 'EPC',
   currency: 'INR',
+  scope: '',
   baselineStart: '',
   baselineFinish: '',
   enabledStages: ['pmc', 'epc', 'eptp', 'om'],
@@ -158,6 +160,7 @@ export function ProjectWizard({
         budget: d.budget ? Number(d.budget) : undefined,
         targetMargin: d.targetMargin ? Number(d.targetMargin) : undefined,
         projectType: d.projectType || undefined,
+        scope: d.scope || undefined,
         currency: d.currency || undefined,
         baselineStart: d.baselineStart || null,
         baselineFinish: d.baselineFinish || null,
@@ -282,6 +285,17 @@ export function ProjectWizard({
                   <Field label="Technology">
                     <input className={inputCls} style={inputStyle} value={d.technology} onChange={(e) => set('technology', e.target.value)} />
                   </Field>
+                  <div className="col-span-2">
+                    <Field label="Scope of the project" hint="In the client's words: what the engagement covers and its boundaries.">
+                      <textarea
+                        className={inputCls}
+                        style={{ ...inputStyle, resize: 'vertical', minHeight: 56 }}
+                        value={d.scope}
+                        onChange={(e) => set('scope', e.target.value)}
+                        placeholder="e.g. EPC of a 4.8 TPD CBG plant, excluding land and grid tie-up"
+                      />
+                    </Field>
+                  </div>
                 </div>
               </SectionGroup>
 
@@ -460,6 +474,7 @@ export function ProjectWizard({
                   ['Project', `${d.name || '—'} (${d.code || '…'})`],
                   ['Client', clientOpts.find((c) => c.id === d.clientId)?.name ?? 'Not set'],
                   ['Type · Currency', `${d.projectType} · ${d.currency}`],
+                ['Scope', d.scope || '—'],
                   ['Capacity', d.capacityTpd ? `${d.capacityTpd} TPD` : '—'],
                   ['Technology', d.technology || '—'],
                 ]} />
@@ -564,10 +579,12 @@ function SectionGroup({
 function Field({
   label,
   required,
+  hint,
   children,
 }: {
   label: string;
   required?: boolean;
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -580,6 +597,11 @@ function Field({
           </span>
         ) : null}
       </span>
+      {hint ? (
+        <span className="mb-1 block text-[10.5px]" style={{ color: 'var(--muted)' }}>
+          {hint}
+        </span>
+      ) : null}
       {children}
     </label>
   );
