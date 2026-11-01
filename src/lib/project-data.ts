@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { projects as projectService } from './services';
 import type { ProjectOption } from './services';
@@ -84,7 +84,11 @@ export function useProjectData(): ProjectData {
     void load();
   }, [load]);
 
-  const projects = rows.map(toView);
+  // Memoize: consumers key effects on `current`'s identity. Rebuilding the
+  // array (and thus `current`) on every render re-fires those effects, and
+  // an effect that fetches and sets state loops until the browser runs out
+  // of memory. Referential stability per `rows` change is the fix.
+  const projects = useMemo(() => rows.map(toView), [rows]);
 
   return {
     projects,
