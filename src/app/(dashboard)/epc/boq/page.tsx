@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { RecordForm } from '@/components/RecordForm';
+import { ImportExcelModal } from '@/components/ImportExcelModal';
 import { Button, Chip, DataTable, Notice, PageHead, Panel, VitalsRail } from '@/components/ui';
 import { records } from '@/lib/services';
 import type { RecordRow, RecordType } from '@/lib/types';
@@ -27,6 +28,7 @@ export default function EpcBoqPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState<RecordRow | null>(null);
   const [filter, setFilter] = useState('');
 
@@ -68,6 +70,7 @@ export default function EpcBoqPage() {
     let approved = 0;
     let pending = 0;
     let overQty = 0;
+    let amountMismatch = 0;
 
     for (const r of rows) {
       const qty = Number(r.data.quantity) || 0;
@@ -82,6 +85,13 @@ export default function EpcBoqPage() {
       }
       if (status === 'Pending approval') pending += 1;
       if (qty > 0 && orderedQty > qty) overQty += 1;
+      // Amount check (client log): qty × rate must equal the carried
+      // amount. Rate is ₹, amount is ₹L, so the expected amount is
+      // qty × rate ÷ 100000; a gap past ₹1000 flags the line.
+      if (amount > 0) {
+        const expected = (qty * rate) / 100_000;
+        if (Math.abs(amount - expected) > 0.01) amountMismatch += 1;
+      }
     }
 
     return {
@@ -90,6 +100,7 @@ export default function EpcBoqPage() {
       orderedPct: value > 0 ? Math.round((approved / value) * 100) : 0,
       pending,
       overQty,
+      amountMismatch,
       lines: rows.length,
     };
   }, [rows]);
@@ -109,7 +120,7 @@ export default function EpcBoqPage() {
         description="The approved BOQ is the reference for every purchase requirement and every unit of material consumed on site. Revisions are versioned and re-approved."
         actions={
           <>
-            <Button>Import from Excel</Button>
+            <Button onClick={() => setImportOpen(true)}>Import from Excel</Button>
             <Button>Revision history</Button>
             <Button
               variant="primary"
@@ -150,6 +161,12 @@ export default function EpcBoqPage() {
             value: String(totals.overQty),
             note: 'ordered beyond the BOQ quantity',
             tone: totals.overQty > 0 ? ('bad' as const) : undefined,
+          },
+          {
+            label: 'Amount check',
+            value: String(totals.amountMismatch),
+            note: 'line(s) where amount ≠ qty × rate',
+            tone: totals.amountMismatch > 0 ? ('bad' as const) : undefined,
           },
         ]}
       />
@@ -199,8 +216,13 @@ export default function EpcBoqPage() {
                 ]
               : visible.map((r): React.ReactNode[] => {
                   const qty = Number(r.data.quantity) || 0;
+                  const rate = Number(r.data.rate) || 0;
+                  const amount = Number(r.data.amount) || 0;
                   const orderedQty = Number(r.data.orderedQty) || 0;
                   const status = String(r.data.status ?? 'Pending approval');
+                  // Expected amount in ₹L; a gap past ₹1000 marks the line.
+                  const expectedAmount = (qty * rate) / 100_000;
+                  const amountOff = amount > 0 && Math.abs(amount - expectedAmount) > 0.01;
                   return [
                     <span key="ref" className="num text-[12px]" style={{ color: 'var(--muted)' }}>
                       {r.ref}
@@ -209,7 +231,9 @@ export default function EpcBoqPage() {
                     String(r.data.unit ?? ''),
                     <span key="q" className="num">{qty.toLocaleString('en-IN')}</span>,
                     <span key="r" className="num">{money(Number(r.data.rate) || 0)}</span>,
-                    <span key="a" className="num">{(Number(r.data.amount) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>,
+                    <span key="a" className="num" title={amountOff ? `Expected ₹${expectedAmount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}L from qty × rate` : undefined} style={amountOff ? { color: 'var(--red)' } : undefined}>
+                      {amountOff ? `${amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ⚠` : amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                    </span>,
                     <span key="o" className="num">{pctText(qty, orderedQty)}</span>,
                     <Chip key="s" tone={STATUS_TONE[status] ?? 'mute'}>{status}</Chip>,
                     <Button
@@ -241,6 +265,17 @@ export default function EpcBoqPage() {
             setFormOpen(false);
             void load();
           }}
+        />
+      ) : null}
+
+      {importOpen && type ? (
+        <ImportExcelModal
+          type={type}
+          create={async (data) => {
+            await records.create(BOQ_KEY, { data });
+          }}
+          onClose={() => setImportOpen(false)}
+          onImported={() => void load()}
         />
       ) : null}
     </>

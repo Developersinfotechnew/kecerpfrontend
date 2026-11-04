@@ -86,6 +86,18 @@ export interface RecordField {
    * static options — e.g. GRN vendor follows the Vendor master.
    */
   optionsFrom?: string;
+  /**
+   * Scope for optionsFrom. When 'project', the live options load for the
+   * record's project (e.g. the DSR task dropdown lists only this
+   * project's WBS plan), not every project's rows.
+   */
+  optionsFromScope?: string;
+  /**
+   * Auto-reflect: when this select is fed from a register, picking an option
+   * copies that row's mapped fields onto the form (target key -> source row
+   * key). GRN: selecting the PO reflects its item and quantity.
+   */
+  optionsFromDetail?: Record<string, string>;
   refType: RefTarget | '';
   align: 'left' | 'right';
   listColumn: boolean;

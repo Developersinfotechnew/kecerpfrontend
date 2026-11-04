@@ -237,6 +237,7 @@ export default function EpcQualityPage() {
                       { key: 'item', label: 'Item' },
                       { key: 'date', label: 'Date' },
                       { key: 'result', label: 'Result' },
+                      { key: 'ncrimg', label: 'NCR image' },
                       { key: 'status', label: 'Status' },
                     ]
                   : tab === 'ncr'
@@ -273,6 +274,7 @@ export default function EpcQualityPage() {
                       <span key="i" className="text-[12.5px]">{String(r.data.itemDescription ?? '')}</span>,
                       <span key="d" className="text-[12.5px]" style={{ color: 'var(--muted)' }}>{String(r.data.inspectionDate ?? '') || '—'}</span>,
                       <span key="res"><Chip tone={r.data.result === 'Rejected' || r.data.result === 'Rework required' ? 'bad' : 'ok'}>{String(r.data.result ?? '')}</Chip></span>,
+                      <span key="im">{ncrImageCell(r.data.ncrImage)}</span>,
                       <span key="s"><Chip tone={STATUS_TONE[String(r.data.status ?? '')] ?? 'mute'}>{String(r.data.status ?? '')}</Chip></span>,
                     ])
                   : tab === 'ncr'
@@ -301,6 +303,36 @@ export default function EpcQualityPage() {
 }
 
 /** Which register a row came from, used by the "All" tab. */
+/**
+ * NCR image cell. The descriptor's url is a short-lived signed download
+ * link (7-day default), same pattern as the Documents screen and the
+ * generic register file cells. Image mimetypes render a thumbnail;
+ * anything else falls back to the download link.
+ */
+function ncrImageCell(value: unknown) {
+  const img = value as { url?: string; name?: string; mimetype?: string } | null;
+  if (!img || typeof img !== 'object' || !img.url) {
+    return <span style={{ color: 'var(--faint)' }}>—</span>;
+  }
+  if (img.mimetype?.startsWith('image/')) {
+    return (
+      <a href={img.url} target="_blank" rel="noreferrer" title={img.name || 'Open NCR image'}>
+        <img
+          src={img.url}
+          alt={img.name || 'NCR image'}
+          width={44}
+          style={{ borderRadius: 3, border: '1px solid var(--line)', display: 'block' }}
+        />
+      </a>
+    );
+  }
+  return (
+    <a href={img.url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>
+      {img.name || 'Download'}
+    </a>
+  );
+}
+
 function registerOf(data: Record<string, unknown>): 'ITP' | 'Inspection' | 'NCR' | 'Test' | 'Other' {
   if (data.activity && data.inspectionPoint) return 'ITP';
   if (data.headline && data.correctiveAction !== undefined) return 'NCR';

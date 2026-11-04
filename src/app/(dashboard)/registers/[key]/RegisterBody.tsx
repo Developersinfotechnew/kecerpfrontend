@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 
 import { Button, Chip, DataTable, Notice, PageHead, Panel } from '@/components/ui';
 import { RecordForm } from '@/components/RecordForm';
+import { ImportExcelModal } from '@/components/ImportExcelModal';
 import { useProjectData } from '@/lib/project-data';
 import { useSession } from '@/app/session';
 import { records, projects, admin, approvals, type ProjectOption, type RecordApprovalSummary, type RecordApprovalState } from '@/lib/services';
@@ -43,6 +44,7 @@ export default function RegisterBody() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   // CR-11: the DPR register opens the create form pre-filled from the day's
   // DSRs. The prefilled values sit here and are handed to the form on open.
   const [prefill, setPrefill] = useState<Record<string, unknown> | undefined>(undefined);
@@ -266,6 +268,9 @@ export default function RegisterBody() {
             ) : null}
             <Button onClick={() => window.print()}>Print</Button>
             <Button onClick={() => exportCsv()}>Export CSV</Button>
+            {type ? (
+              <Button onClick={() => setImportOpen(true)}>Import Excel</Button>
+            ) : null}
             <Button variant="primary" onClick={() => setCreating(true)}>
               Add entry
             </Button>
@@ -401,6 +406,19 @@ export default function RegisterBody() {
             setPrefill(undefined);
             void load();
           }}
+        />
+      ) : null}
+
+      {importOpen && type ? (
+        <ImportExcelModal
+          type={type}
+          create={async (data) => {
+            // Rows import into the project the register is filtered to, so an
+            // import into a scoped register never lands on the wrong project.
+            await records.create(key, projectId ? { data, projectId } : { data });
+          }}
+          onClose={() => setImportOpen(false)}
+          onImported={() => void load()}
         />
       ) : null}
     </>

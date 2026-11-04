@@ -10,6 +10,10 @@ import type { RecordRow, RecordType } from '@/lib/types';
 
 const STOCK_KEY = 'inventory_stock';
 const GRN_KEY = 'goods_receipts';
+const PO_KEY = 'raise_po';
+// A PO is "open" until it is closed or rejected. Anything else still has
+// goods that can be received against it, so it shows in the open-PO panel.
+const OPEN_PO_STATUS = new Set(['Draft', 'Under approval', 'Approved', 'Released']);
 
 const STOCK_TONE: Record<string, 'ok' | 'info' | 'warn' | 'bad' | 'mute'> = {
   'In stock': 'ok',
@@ -33,15 +37,20 @@ export default function EpcInventoryPage() {
   const [grnType, setGrnType] = useState<RecordType | null>(null);
   const [stock, setStock] = useState<RecordRow[]>([]);
   const [grns, setGrns] = useState<RecordRow[]>([]);
+  const [openPos, setOpenPos] = useState<RecordRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState<{ type: RecordType; row: RecordRow | null } | null>(null);
+  // The form's type + row (null for create) + optional prefill values. The
+  // prefill is how "Receive against PO" opens a GRN already filled with the
+  // PO's vendor and reference instead of a blank form.
+  const [form, setForm] = useState<{ type: RecordType; row: RecordRow | null; prefill?: Record<string, unknown> } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [[sType, sPage], [gType, gPage]] = await Promise.all([
+      const [poPage, [sType, sPage], [gType, gPage]] = await Promise.all([
+        records.list(PO_KEY, { limit: 300 }).catch(() => ({ items: [] as RecordRow[] })),
         Promise.all([records.type(STOCK_KEY), records.list(STOCK_KEY, { limit: 300 })]),
         Promise.all([records.type(GRN_KEY), records.list(GRN_KEY, { limit: 300 })]),
       ]);
@@ -49,6 +58,7 @@ export default function EpcInventoryPage() {
       setGrnType(gType);
       setStock(sPage.items);
       setGrns(gPage.items);
+      setOpenPos(poPage.items.filter((r) => OPEN_PO_STATUS.has(String(r.data.status ?? ''))));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load stock records');
     } finally {
@@ -175,6 +185,56 @@ export default function EpcInventoryPage() {
       <div className="mt-[18px]" />
 
       <Panel
+        title="Open POs — receive against"
+        sub={loading ? 'Loading' : `${openPos.length} PO(s) open`}
+        bodyless
+      >
+        <DataTable
+          columns={[
+            { key: 'p', label: 'PO no.' },
+            { key: 'v', label: 'Vendor' },
+            { key: 'val', label: 'Value (₹L)', align: 'right' },
+            { key: 'pr', label: 'Promised' },
+            { key: 's', label: 'Status', align: 'right' },
+            { key: 'a', label: '', align: 'right' },
+          ]}
+          rows={
+            openPos.length === 0
+              ? [[loading ? 'Loading open POs…' : 'No open POs. Receive against a PO once it is raised.']]
+              : openPos.map((po): React.ReactNode[] => {
+                  const status = String(po.data.status ?? '');
+                  return [
+                    <Code key="p">{String(po.data.poNo ?? po.ref)}</Code>,
+                    String(po.data.vendor ?? '—'),
+                    <span key="val" className="num">{num(po.data.value).toLocaleString('en-IN')}</span>,
+                    formatDay(po.data.promised),
+                    <Chip key="s" tone={status === 'Released' ? 'ok' : 'info'}>{status}</Chip>,
+                    <Button
+                      key="a"
+                      variant="small"
+                      onClick={() =>
+                        grnType &&
+                        setForm({
+                          type: grnType,
+                          row: null,
+                          prefill: {
+                            vendor: po.data.vendor,
+                            poRef: String(po.data.poNo ?? po.ref),
+                          },
+                        })
+                      }
+                    >
+                      Receive
+                    </Button>,
+                  ];
+                })
+          }
+        />
+      </Panel>
+
+      <div className="mt-[18px]" />
+
+      <Panel
         title="Goods receipts"
         sub={loading ? 'Loading' : `${grns.length} GRNs · ${roll.pendingGrns} pending`}
         bodyless
@@ -214,6 +274,7 @@ export default function EpcInventoryPage() {
         <RecordForm
           type={form.type}
           record={form.row}
+          initialValues={form.prefill}
           onCancel={() => setForm(null)}
           onSubmit={async (body) => {
             const key = form.type.key;

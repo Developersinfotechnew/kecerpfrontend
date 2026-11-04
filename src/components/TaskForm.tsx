@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { records } from '@/lib/services';
 import type { RecordField, RecordType } from '@/lib/types';
@@ -26,6 +26,20 @@ export function TaskForm({ type, projectId, onCancel, onCreated }: TaskFormProps
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Client log: duration is self-calculated from START to END. When both
+  // dates are present, the days between them fill the duration field — no
+  // hand entry. The user can still override it for a non-calendar task.
+  const hasDuration = type.fields.some((f) => f.key === 'durationDays');
+  const hasStart = type.fields.some((f) => f.key === 'startDate');
+  useEffect(() => {
+    if (!hasDuration || !hasStart) return;
+    const start = new Date(values.startDate ?? '');
+    const end = new Date(values.dueDate ?? '');
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return;
+    const days = Math.max(0, Math.round((end.getTime() - start.getTime()) / 86_400_000));
+    setValues((prev) => ({ ...prev, durationDays: String(days) }));
+  }, [values.startDate, values.dueDate, hasDuration, hasStart]);
 
   async function submit(event: React.FormEvent): Promise<void> {
     event.preventDefault();

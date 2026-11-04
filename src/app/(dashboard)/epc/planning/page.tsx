@@ -6,6 +6,7 @@ import { Button, Chip, DataTable, Gantt, GanttLegend, Grid, Notice, PageHead, Pa
 import { TaskForm } from '@/components/TaskForm';
 import { useProjectData } from '@/lib/project-data';
 import { records, wbsCpm } from '@/lib/services';
+import { openPrintReport } from '@/lib/print-report';
 import type { CpmResult } from '@/lib/services';
 import type { RecordRow, RecordType } from '@/lib/types';
 
@@ -21,9 +22,111 @@ export default function EpcPlanningPage() {
   const [adding, setAdding] = useState(false);
   const [cpm, setCpm] = useState<CpmResult | null>(null);
   const [cpmError, setCpmError] = useState<string | null>(null);
+  const [milestones, setMilestones] = useState<RecordRow[]>([]);
   // Baseline shows the planned bars only. Actual overlays each activity's
   // completion on top of the same bar, so plan vs done read at a glance.
   const [view, setView] = useState<'baseline' | 'actual'>('baseline');
+
+  const day = (iso: string) => (iso ? new Date(iso).toLocaleDateString('en-GB') : '—');
+
+  // L1 schedule: every CPM activity in schedule order.
+  function l1Table(): { head: string[]; rows: string[][] } {
+    const rows = cpm?.activities
+      .map((a) => [
+        a.wbsCode,
+        a.description,
+        a.owner || '—',
+        String(a.duration),
+        a.predecessor ? `${a.predecessor} ${a.relType}` : '—',
+        day(a.earlyStartISO),
+        day(a.earlyFinishISO),
+        String(a.progress),
+        a.status || '—',
+      ])
+      ?? [];
+    return {
+      head: ['WBS', 'Activity', 'Owner', 'Dur', 'Pred', 'Start', 'Finish', 'Prog %', 'Status'],
+      rows,
+    };
+  }
+
+  // Milestones from the schedule_milestones register, in planned order.
+  function milestonesTable(): { head: string[]; rows: string[][] } {
+    const rows = [...milestones]
+      .sort((a, b) => new Date(String(a.data.plannedDate ?? 0)).getTime() - new Date(String(b.data.plannedDate ?? 0)).getTime())
+      .map((m) => [
+        String(m.data.milestone ?? m.ref),
+        String(m.data.owner ?? '—'),
+        day(String(m.data.plannedDate ?? '')),
+        day(String(m.data.forecastDate ?? '')),
+        String(m.data.progress ?? 0),
+        String(m.data.status ?? '—'),
+      ]);
+    return {
+      head: ['Milestone', 'Owner', 'Planned', 'Forecast', 'Prog %', 'Status'],
+      rows,
+    };
+  }
+
+  // Critical path: only the zero-float activities, in path order.
+  function criticalTable(): { head: string[]; rows: string[][] } {
+    const rows = cpm?.criticalPath.map((a) => [
+      a.wbsCode,
+      a.description,
+      a.owner || '—',
+      String(a.duration),
+      a.predecessor ? `${a.predecessor} ${a.relType}` : '—',
+      day(a.earlyStartISO),
+      day(a.earlyFinishISO),
+      String(a.totalFloat),
+    ]) ?? [];
+    return {
+      head: ['WBS', 'Activity', 'Owner', 'Dur', 'Pred', 'Start', 'Finish', 'Float'],
+      rows,
+    };
+  }
+
+  function downloadCriticalPath(): void {
+    if (!cpm || !p) return;
+    const cp = criticalTable();
+    openPrintReport({
+      title: 'Critical Path',
+      sub: p.name,
+      meta: [
+        `Project: ${p.name}`,
+        `Run: ${cpm.projectFinish} days`,
+        `Finish: ${day(cpm.projectFinishISO)}`,
+        `${cp.rows.length} zero-float activities`,
+      ],
+      tables: [
+        { title: 'Critical path (zero float)', head: cp.head, rows: cp.rows },
+        ...(cpm.issues.length
+          ? [{ title: 'Schedule issues', head: ['Issue'], rows: cpm.issues.map((i) => [i]) }]
+          : []),
+      ],
+    });
+  }
+
+  function downloadL1Schedule(): void {
+    if (!p) return;
+    const l1 = l1Table();
+    const ms = milestonesTable();
+    openPrintReport({
+      title: 'L1 Schedule / Milestones',
+      sub: p.name,
+      meta: [
+        `Project: ${p.name}`,
+        cpm
+          ? `Window: ${day(cpm.projectStartISO)} – ${day(cpm.projectFinishISO)}`
+          : 'Window: not yet computed',
+        `${l1.rows.length} activities · ${ms.rows.length} milestones`,
+      ],
+      tables: [
+        { title: 'L1 schedule (WBS)', head: l1.head, rows: l1.rows },
+        { title: 'Milestones', head: ms.head, rows: ms.rows },
+      ],
+    });
+  }
 
   // A rejected fetch ("Failed to fetch") means the API itself was
   // unreachable, not that the schedule is wrong. Naming that plainly — with
@@ -63,10 +166,21 @@ export default function EpcPlanningPage() {
     }
   }, [p]);
 
+  const loadMilestones = useCallback(async () => {
+    if (!p) return;
+    try {
+      const page = await records.list('schedule_milestones', { projectId: p.id, limit: 300 });
+      setMilestones(page.items);
+    } catch {
+      setMilestones([]);
+    }
+  }, [p]);
+
   useEffect(() => {
     void loadTasks();
     void loadCpm();
-  }, [loadTasks, loadCpm]);
+    void loadMilestones();
+  }, [loadTasks, loadCpm, loadMilestones]);
 
   if (!p) {
     return <PageHead title="Planning & tasks" description="No project is in your scope." />;
@@ -86,6 +200,12 @@ export default function EpcPlanningPage() {
               {view === 'actual' ? 'Actual view' : 'Baseline vs actual'}
             </Button>
             <Button variant="primary" onClick={() => setAdding(true)}>Add task</Button>
+            <Button onClick={() => downloadCriticalPath()} disabled={!cpm}>
+              Download critical path (PDF)
+            </Button>
+            <Button onClick={() => downloadL1Schedule()}>
+              Download L1 schedule (PDF)
+            </Button>
           </>
         }
       />

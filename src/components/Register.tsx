@@ -123,7 +123,12 @@ export function Register({ typeKey, title, description, readOnly }: RegisterProp
       </span>,
     );
 
-    if (mayUpdate || mayDelete) {
+    // Client log: a task the PM has approved is locked. Edit and delete both
+    // hide; the only move out is reopening it (status → Reopened), which the
+    // backend allows and this UI re-enables on the next load.
+    const lockedTask =
+      typeKey === 'tasks' && String(row.data.status ?? '') === 'Approved by PM';
+    if ((mayUpdate || mayDelete) && !lockedTask) {
       cells.push(
         <span key="_actions" className="flex justify-end gap-2">
           {mayUpdate ? (

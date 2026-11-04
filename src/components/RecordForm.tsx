@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { projects as projectService, records, uploads as uploadService } from '@/lib/services';
 import type { RecordField, RecordRow, RecordType } from '@/lib/types';
@@ -46,6 +46,13 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
   /** Live select options, keyed by the source register key a field pulls from. */
   const [liveOptions, setLiveOptions] = useState<Record<string, string[]>>({});
+  /**
+   * The source rows behind each option list, keyed the same way. optionsFrom
+   * fields can auto-reflect a picked row's other fields (the GRN's PO select
+   * reflects the PO's item and quantity), so the option loader keeps the
+   * rows, not just their titles.
+   */
+  const [liveRows, setLiveRows] = useState<Record<string, Array<{ title: string; data: Record<string, unknown> }>>>({});
 
   const fields = [...type.fields].sort((a, b) => a.sortOrder - b.sortOrder);
 
@@ -53,35 +60,78 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
   // Vendor master) load their options live: one register fetch per source,
   // each rendered through its own title field. A failure leaves the field
   // with its static options, so the form still works.
-  const sourceKeys = [...new Set(fields.filter((f) => f.optionsFrom).map((f) => f.optionsFrom as string))];
-  useEffect(() => {
-    let cancelled = false;
-    sourceKeys.forEach((key) => {
+  //
+  // Two kinds of source. Global: loaded once, same for every record — the
+  // vendor master, the BOQ reference. Project-scoped (optionsFromScope
+  // 'project'): loaded for the record's project only — the DSR task dropdown
+  // must list this project's plan, never another project's WBS.
+  const globalKeys = [
+    ...new Set(fields.filter((f) => f.optionsFrom && f.optionsFromScope !== 'project').map((f) => f.optionsFrom as string)),
+  ];
+  const scopedKeys = [
+    ...new Set(fields.filter((f) => f.optionsFrom && f.optionsFromScope === 'project').map((f) => f.optionsFrom as string)),
+  ];
+
+  const loadSource = useCallback(
+    (key: string, projectId?: string): (() => void) => {
+      let cancelled = false;
       // Type first (for its title field), then the rows. One source = one
       // option list; rows are read in title-field order, de-duplicated.
       void (async () => {
         try {
           const [t, page] = await Promise.all([
             records.type(key),
-            records.list(key, { limit: 500 }),
+            records.list(key, projectId ? { projectId, limit: 500 } : { limit: 500 }),
           ]);
           if (cancelled) return;
-          const opts = page.items
-            .map((r) => String(r.data[t.titleField] ?? r.ref))
-            .filter((v) => v !== '')
-            .map((v) => v.trim())
-            .filter((v, i, all) => all.indexOf(v) === i);
-          setLiveOptions((prev) => ({ ...prev, [key]: opts }));
+          const rows = page.items
+            .map((r) => ({
+              title: String(r.data[t.titleField] ?? r.ref),
+              data: (r.data ?? {}) as Record<string, unknown>,
+            }))
+            .filter((r) => r.title !== '')
+            .map((r) => ({ ...r, title: r.title.trim() }));
+          const seen = new Set<string>();
+          const dedup = rows.filter((r) => (seen.has(r.title) ? false : (seen.add(r.title), true)));
+          setLiveOptions((prev) => ({ ...prev, [key]: dedup.map((r) => r.title) }));
+          setLiveRows((prev) => ({ ...prev, [key]: dedup }));
         } catch {
           // A failed source fetch leaves the field on its static options.
         }
       })();
-    });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const unloads = globalKeys.map((key) => loadSource(key));
     return () => {
-      cancelled = true;
+      for (const u of unloads) u();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type.key, sourceKeys.length]);
+  }, [type.key, globalKeys.length, loadSource]);
+
+  // Project-scoped sources reload whenever the project changes: the option
+  // list must follow the record's project. No project chosen = no list, so a
+  // scoped dropdown stays empty until a project is picked.
+  useEffect(() => {
+    if (scopedKeys.length === 0) return;
+    if (!projectId) {
+      for (const key of scopedKeys) {
+        setLiveOptions((prev) => ({ ...prev, [key]: [] }));
+        setLiveRows((prev) => ({ ...prev, [key]: [] }));
+      }
+      return;
+    }
+    const unloads = scopedKeys.map((key) => loadSource(key, projectId));
+    return () => {
+      for (const u of unloads) u();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type.key, scopedKeys.length, projectId, loadSource]);
 
   // Transaction registers that open an approval chain must be bound to a
   // project. Without one, the chain has no projectId, the team gate can't
@@ -269,7 +319,21 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
                     : f
                 }
                 value={values[f.key]}
-                onChange={(v) => set(f.key, v)}
+                onChange={(v) => {
+                  set(f.key, v);
+                  // optionsFromDetail: picking the PO reflects its item and
+                  // quantity onto the receipt so the GRN reads what the PO
+                  // bought, no re-typing. A free-typed value reflects nothing.
+                  if (f.optionsFrom && f.optionsFromDetail && typeof v === 'string' && v) {
+                    const hit = (liveRows[f.optionsFrom] ?? []).find((r) => r.title === v);
+                    if (hit) {
+                      for (const [target, source] of Object.entries(f.optionsFromDetail)) {
+                        const reflected = hit.data[source];
+                        if (reflected !== undefined && reflected !== null) set(target, String(reflected));
+                      }
+                    }
+                  }
+                }}
                 pending={pending[f.key]}
                 onPick={(file) => setPending((p) => ({ ...p, [f.key]: file }))}
                 onClear={() => clearField(f.key)}
