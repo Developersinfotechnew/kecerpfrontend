@@ -613,6 +613,28 @@ function ComboSelect({
  * A newly chosen File renders with its name and a remove affordance; it is
  * uploaded on submit, not on selection.
  */
+/**
+ * Width of a picked image, measured from the File itself. Used for a
+ * low-resolution warning: a WhatsApp-compressed photo (~700px wide) uploads
+ * fine but reads as "blurry" — catch it at pick time instead.
+ */
+function useImageWidth(file: File | undefined): number | null {
+  const [w, setW] = useState<number | null>(null);
+  useEffect(() => {
+    setW(null);
+    if (!file || !file.type.startsWith('image/')) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      setW(img.naturalWidth);
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  return w;
+}
+
 function FileInput({
   value,
   pending,
@@ -628,6 +650,8 @@ function FileInput({
   onClear: () => void;
   onChange: (value: unknown) => void;
 }) {
+  const imgWidth = useImageWidth(pending);
+
   // A pending pick outranks the saved value: it is what will actually save.
   if (uploading) {
     return (
@@ -643,6 +667,15 @@ function FileInput({
       <span className="inline-flex items-center gap-2 rounded px-2.5 py-1.5 text-[12.5px]" style={INPUT_STYLE}>
         <span className="truncate">{pending.name}</span>
         <span style={{ color: 'var(--muted)' }}>({humanSize(pending.size)})</span>
+        {pending.type.startsWith('image/') && imgWidth !== null && imgWidth < 1000 ? (
+          <span
+            className="rounded px-1.5 py-0.5 text-[11px]"
+            style={{ background: 'var(--warn-soft)', color: 'var(--warn)' }}
+            title={`Image is ${imgWidth}px wide — below 1000px it will look soft when zoomed`}
+          >
+            Low-res ({imgWidth}px)
+          </span>
+        ) : null}
         <button
           type="button"
           onClick={onClear}

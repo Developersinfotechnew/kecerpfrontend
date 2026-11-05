@@ -112,7 +112,7 @@ export default function EpcEvmPage() {
         </span>
         ,
         <Chip key="s" tone={WP_TONE[status] ?? 'mute'}>{status}</Chip>,
-        <Button key="edit" onClick={() => setForm(r)}>Edit</Button>,
+        <Button key="edit" variant="primary" className="min-w-[90px] justify-center" onClick={() => setForm(r)}>Edit</Button>,
       ];
     });
 

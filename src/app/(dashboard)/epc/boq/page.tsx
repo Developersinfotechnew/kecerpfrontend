@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { RecordForm } from '@/components/RecordForm';
 import { ImportExcelModal } from '@/components/ImportExcelModal';
+import { useRowApprovals } from '@/lib/row-approvals';
+import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
 import { Button, Chip, DataTable, Notice, PageHead, Panel, VitalsRail } from '@/components/ui';
 import { records } from '@/lib/services';
 import type { RecordRow, RecordType } from '@/lib/types';
@@ -29,6 +31,12 @@ export default function EpcBoqPage() {
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  // Approval rule: an approved BOQ line shows Details only; before
+  // approval it shows Edit + Details (the backend freezes approved rows).
+  const { isApproved, hasChain, openDetail, detail, setDetail, detailBusy } = useRowApprovals(
+    BOQ_KEY,
+    rows,
+  );
   const [editing, setEditing] = useState<RecordRow | null>(null);
   const [filter, setFilter] = useState('');
 
@@ -236,15 +244,30 @@ export default function EpcBoqPage() {
                     </span>,
                     <span key="o" className="num">{pctText(qty, orderedQty)}</span>,
                     <Chip key="s" tone={STATUS_TONE[status] ?? 'mute'}>{status}</Chip>,
-                    <Button
-                      key="edit"
-                      onClick={() => {
-                        setEditing(r);
-                        setFormOpen(true);
-                      }}
-                    >
-                      Edit
-                    </Button>,
+                    <span key="edit" className="flex items-center justify-end gap-2">
+                      {isApproved(r.ref) ? null : (
+                        <Button
+                          variant="primary"
+                          className="min-w-[90px] justify-center"
+                          onClick={() => {
+                            setEditing(r);
+                            setFormOpen(true);
+                          }}
+                        >
+                          Edit
+                        </Button>
+                      )}
+                      {isApproved(r.ref) || hasChain(r.ref) ? (
+                        <Button
+                          variant="primary"
+                          className="min-w-[90px] justify-center"
+                          disabled={detailBusy}
+                          onClick={() => void openDetail(r.ref)}
+                        >
+                          Details
+                        </Button>
+                      ) : null}
+                    </span>,
                   ];
                 })
           }
@@ -278,6 +301,8 @@ export default function EpcBoqPage() {
           onImported={() => void load()}
         />
       ) : null}
+
+      {detail ? <ApprovalDetailsModal state={detail} onClose={() => setDetail(null)} /> : null}
     </>
   );
 }

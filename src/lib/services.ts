@@ -686,6 +686,22 @@ export const approvals = {
     return api<AwaitingResubmitItem[]>('/workflow/awaiting');
   },
 
+  /**
+   * Manual send-for-approval: opens the register's chain for a record whose
+   * create-time trigger missed it (row predates the trigger, or the server
+   * was running an older build). 404 when the register has no chain; 409
+   * when one already exists.
+   */
+  async sendForApproval(
+    entity: string,
+    entityId: string,
+  ): Promise<{ id: string; status: string; totalSteps: number }> {
+    return api<{ id: string; status: string; totalSteps: number }>('/workflow/instances/send', {
+      method: 'POST',
+      body: { entity, entityId },
+    });
+  },
+
   /** Approver's own returns that are still sitting with the requester. */
   async returnedByMe(): Promise<ReturnedByMeItem[]> {
     return api<ReturnedByMeItem[]>('/workflow/returned-by-me');
@@ -868,7 +884,12 @@ export interface RecordApprovalState {
     projectId: string | null;
     raisedByName: string;
     raisedAt: string | null;
-    fields: Array<{ label: string; value: string }>;
+    fields: Array<{
+      label: string;
+      value: string;
+      /** Present when the field is a document upload: the signed download url. */
+      file?: { url: string; name: string; mimetype: string };
+    }>;
   };
 }
 

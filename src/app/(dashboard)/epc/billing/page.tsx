@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { RecordForm } from '@/components/RecordForm';
+import { useRowApprovals } from '@/lib/row-approvals';
+import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
 import { Bar, Button, Chip, DataTable, Feed, Grid, Notice, PageHead, Panel, VitalsRail } from '@/components/ui';
 import { records } from '@/lib/services';
 import type { RecordRow, RecordType } from '@/lib/types';
@@ -43,6 +45,12 @@ export default function EpcBillingPage() {
   const [billType, setBillType] = useState<RecordType | null>(null);
   const [fuType, setFuType] = useState<RecordType | null>(null);
   const [bills, setBills] = useState<RecordRow[]>([]);
+  // Approval rule: an approved RA bill shows Details only; before approval it
+  // shows Edit + Details (the backend freezes approved bills for all users).
+  const { isApproved, hasChain, openDetail, detail, setDetail, detailBusy } = useRowApprovals(
+    BILLS_KEY,
+    bills,
+  );
   const [followups, setFollowups] = useState<RecordRow[]>([]);
   const [receipts, setReceipts] = useState<RecordRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -226,9 +234,18 @@ export default function EpcBillingPage() {
                       {got > 0 ? money(got) : '—'}
                     </span>,
                     <Chip key="s" tone={BILL_TONE[status] ?? 'mute'}>{status}</Chip>,
-                    <Button key="edit" onClick={() => setForm({ type: billType!, row: r })}>
-                      Edit
-                    </Button>,
+                    <span key="edit" className="flex items-center justify-end gap-2">
+                      {isApproved(r.ref) ? null : (
+                        <Button variant="primary" className="min-w-[90px] justify-center" onClick={() => setForm({ type: billType!, row: r })}>
+                          Edit
+                        </Button>
+                      )}
+                      {isApproved(r.ref) || hasChain(r.ref) ? (
+                        <Button variant="primary" className="min-w-[90px] justify-center" disabled={detailBusy} onClick={() => void openDetail(r.ref)}>
+                          Details
+                        </Button>
+                      ) : null}
+                    </span>,
                   ];
                 })
           }
@@ -333,6 +350,8 @@ export default function EpcBillingPage() {
           }}
         />
       ) : null}
+
+      {detail ? <ApprovalDetailsModal state={detail} onClose={() => setDetail(null)} /> : null}
     </>
   );
 }

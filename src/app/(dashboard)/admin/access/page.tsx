@@ -192,7 +192,7 @@ export default function AccessAdminPage() {
                   <span key="x" className="flex justify-end gap-2">
                     {r.isSystem ? <Chip tone="mute">System</Chip> : null}
                     {canUpdate ? (
-                      <Button onClick={() => setRoleForm(r)}>Edit</Button>
+                      <Button variant="primary" className="min-w-[90px] justify-center" onClick={() => setRoleForm(r)}>Edit</Button>
                     ) : null}
                     {canDelete && !r.isSystem ? (
                       <Button onClick={() => void removeRole(r)}>Delete</Button>
@@ -272,7 +272,7 @@ export default function AccessAdminPage() {
                   </Chip>,
                   <span key="x" className="flex justify-end gap-2">
                     {canUpdate ? (
-                      <Button onClick={() => setNavForm(e)}>Edit</Button>
+                      <Button variant="primary" className="min-w-[90px] justify-center" onClick={() => setNavForm(e)}>Edit</Button>
                     ) : null}
                     {canDelete && e.isActive ? (
                       <Button onClick={() => void deactivateNav(e)}>Hide</Button>

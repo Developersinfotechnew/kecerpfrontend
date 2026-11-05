@@ -209,7 +209,7 @@ export default function ClientsPage() {
 
               {can('project:create') ? (
                 <div className="mt-3 flex gap-2 border-t pt-3" style={{ borderColor: 'var(--line-2)' }}>
-                  <Button variant="small" onClick={() => setEditing(c)}>
+                  <Button variant="primary" onClick={() => setEditing(c)}>
                     Edit
                   </Button>
                   <Button

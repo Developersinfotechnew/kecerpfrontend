@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { RecordForm } from '@/components/RecordForm';
 import { Bar, Button, Chip, DataTable, Notice, PageHead, Panel, VitalsRail } from '@/components/ui';
-import { records } from '@/lib/services';
+import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
+import { approvals, records } from '@/lib/services';
+import type { RecordApprovalState, RecordApprovalSummary } from '@/lib/services';
 import { L } from '@/lib/project-data';
 import type { RecordRow, RecordType } from '@/lib/types';
 
@@ -44,6 +46,54 @@ export default function EpcInventoryPage() {
   // prefill is how "Receive against PO" opens a GRN already filled with the
   // PO's vendor and reference instead of a blank form.
   const [form, setForm] = useState<{ type: RecordType; row: RecordRow | null; prefill?: Record<string, unknown> } | null>(null);
+  // The live approval chain per GRN. A receipt whose chain is open shows
+  // "Waiting"; approval shows "Approved" and the row locks to Details only;
+  // a rejection shows "Rejected". The inspection status above is kept; this
+  // is the separate dynamic approval state the buttons key off.
+  const [grnStates, setGrnStates] = useState<Record<string, RecordApprovalSummary>>({});
+  const [detail, setDetail] = useState<RecordApprovalState | null>(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+
+  const grnRefs = useMemo(() => grns.map((g) => g.ref), [grns]);
+  useEffect(() => {
+    if (grnRefs.length === 0) {
+      setGrnStates({});
+      return;
+    }
+    let cancelled = false;
+    approvals
+      .recordStates(GRN_KEY, grnRefs)
+      .then((s) => {
+        if (!cancelled) setGrnStates(s ?? {});
+      })
+      .catch(() => {
+        if (!cancelled) setGrnStates({});
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grnRefs.join(',')]);
+
+  const openGrnDetail = useCallback(async (ref: string) => {
+    setDetailBusy(true);
+    try {
+      setDetail(await approvals.recordState(GRN_KEY, ref));
+    } finally {
+      setDetailBusy(false);
+    }
+  }, []);
+
+  /** The dynamic approval word: Waiting while the chain is open, then its
+   *  terminal outcome. A chainless row has no approval state to show. */
+  const grnApprovalWord = (ref: string): { label: string; tone: 'ok' | 'warn' | 'bad' | 'info' | 'mute' } => {
+    const st = grnStates[ref];
+    if (!st) return { label: '—', tone: 'mute' };
+    if (st.status === 'approved') return { label: 'Approved', tone: 'ok' };
+    if (st.status === 'rejected') return { label: 'Rejected', tone: 'bad' };
+    if (st.awaitingUser) return { label: 'Returned', tone: 'warn' };
+    return { label: 'Waiting', tone: 'warn' };
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -100,7 +150,7 @@ export default function EpcInventoryPage() {
         <span key="b" className="num">{balance.toLocaleString('en-IN')}</span>,
         <span key="v" className="num">{rate > 0 ? L(value / 100000) : '—'}</span>,
         <Chip key="s" tone={STOCK_TONE[status] ?? 'mute'}>{status}</Chip>,
-        <Button key="edit" onClick={() => setForm({ type: stockType!, row: r })}>
+        <Button key="edit" variant="primary" className="min-w-[90px] justify-center" onClick={() => setForm({ type: stockType!, row: r })}>
           Edit
         </Button>,
       ];
@@ -247,13 +297,16 @@ export default function EpcInventoryPage() {
             { key: 'q', label: 'Qty', align: 'right' },
             { key: 'd', label: 'Date' },
             { key: 's', label: 'Status', align: 'right' },
-            { key: 'edit', label: '' },
+            { key: 'a', label: 'Approval', align: 'right' },
+            { key: 'act', label: '', align: 'right' },
           ]}
           rows={
             grns.length === 0
               ? [[loading ? 'Loading GRNs…' : 'No goods receipts yet. Use Raise GRN.']]
               : grns.map((g): React.ReactNode[] => {
                   const status = String(g.data.status ?? '');
+                  const ap = grnApprovalWord(g.ref);
+                  const decided = ap.label === 'Approved' || ap.label === 'Rejected';
                   return [
                     <Code key="g">{g.ref}</Code>,
                     String(g.data.vendor ?? ''),
@@ -261,9 +314,25 @@ export default function EpcInventoryPage() {
                     <span key="q" className="num">{num(g.data.quantity).toLocaleString('en-IN')}</span>,
                     formatDay(g.data.receivedOn),
                     <Chip key="s" tone={GRN_TONE[status] ?? 'mute'}>{status}</Chip>,
-                    <Button key="edit" onClick={() => setForm({ type: grnType!, row: g })}>
-                      Edit
-                    </Button>,
+                    <Chip key="a" tone={ap.tone}>{ap.label}</Chip>,
+                    <span key="act" className="flex justify-end gap-2">
+                      {/* Edit until the chain decides; Details once it has.
+                          The backend freezes an approved receipt the same way. */}
+                      {decided ? (
+                        <Button
+                          variant="primary"
+                          className="min-w-[90px] justify-center"
+                          disabled={detailBusy}
+                          onClick={() => void openGrnDetail(g.ref)}
+                        >
+                          Details
+                        </Button>
+                      ) : (
+                        <Button variant="primary" className="min-w-[90px] justify-center" onClick={() => setForm({ type: grnType!, row: g })}>
+                          Edit
+                        </Button>
+                      )}
+                    </span>,
                   ];
                 })
           }
@@ -287,6 +356,10 @@ export default function EpcInventoryPage() {
             void load();
           }}
         />
+      ) : null}
+
+      {detail ? (
+        <ApprovalDetailsModal state={detail} onClose={() => setDetail(null)} />
       ) : null}
     </>
   );

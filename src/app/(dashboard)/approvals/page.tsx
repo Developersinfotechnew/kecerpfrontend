@@ -98,6 +98,9 @@ export default function ApprovalsPage() {
   const [historyTab, setHistoryTab] = useState<HistoryStatus | 'all'>('all');
   const [histTrackId, setHistTrackId] = useState<string | null>(null);
   const [detail, setDetail] = useState<import('@/lib/services').RecordApprovalState | null>(null);
+  // Accordion: one pending card open at a time. Clicking a card's header
+  // opens it and closes the others; click again to close it.
+  const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [projectNames, setProjectNames] = useState<Map<string, string>>(new Map());
 
   const loadHistory = useCallback(async (tab: HistoryStatus | 'all') => {
@@ -135,7 +138,19 @@ export default function ApprovalsPage() {
       approvals.returnedByMe(),
     ]);
 
-    if (queueRes.status === 'fulfilled') setItems(queueRes.value as QueueItem[]);
+    if (queueRes.status === 'fulfilled') {
+      const queue = queueRes.value as QueueItem[];
+      // Newest activity first: the latest approval must sit on top, not at
+      // the bottom. An item's last activity is its most recent chain action,
+      // or its creation when no action has been recorded yet.
+      const lastActivity = (i: QueueItem): string => {
+        let m = i.createdAt;
+        for (const a of i.actions ?? []) if (a.at > m) m = a.at;
+        return m;
+      };
+      queue.sort((a, b) => lastActivity(b).localeCompare(lastActivity(a)));
+      setItems(queue);
+    }
     if (awaitingRes.status === 'fulfilled') setResubmissions(awaitingRes.value);
     if (returnsRes.status === 'fulfilled') setReturnedByMe(returnsRes.value);
 
@@ -256,8 +271,18 @@ export default function ApprovalsPage() {
           <div className="divide-y" style={{ borderColor: 'var(--line)' }}>
             {items.map((item) => (
               <div key={item.id} className="px-4 py-3.5">
-                {/* Card header: what it is, who asked, how much, how urgent */}
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                {/* Card header: what it is, who asked, how much, how urgent.
+                Accordion: clicking it opens the chain + decision footer; one
+                card open at a time, the rest stay closed. */}
+                <div
+                  className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1.5"
+                  onClick={() => {
+                    setOpenCardId(openCardId === item.id ? null : item.id);
+                  }}
+                >
+                  <span className="text-[11px]" style={{ color: 'var(--muted)' }} aria-hidden>
+                    {openCardId === item.id ? '▾' : '▸'}
+                  </span>
                   <div>
                     <span className="text-[13px] font-semibold">
                       {item.title ? `${item.title}` : item.entityId}
@@ -275,7 +300,7 @@ export default function ApprovalsPage() {
                       {projectNames.get(item.projectId) ?? item.projectId}
                     </Chip>
                   ) : null}
-                  <span className="num ml-auto text-[13px] font-semibold">
+                  <span className="num text-[13px] font-semibold">
                     ₹{item.amount.toLocaleString('en-IN')}
                   </span>
                   <span className="text-[11.5px]" style={{ color: 'var(--muted)' }}>
@@ -285,22 +310,32 @@ export default function ApprovalsPage() {
                       month: 'short',
                     })}
                   </span>
-                  <Button
-                    onClick={async () => {
-                      const state = await approvals.recordState(item.entity, item.entityId);
-                      setDetail(state);
-                    }}
-                  >
-                    Details
-                  </Button>
+                  {openCardId !== item.id ? (
+                    <span className="text-[11.5px]" style={{ color: 'var(--muted)' }}>
+                      · {item.stepName} (step {item.stepOrder}/{item.totalSteps})
+                    </span>
+                  ) : null}
+                  <span className="ml-auto" onClick={(e) => e.stopPropagation()}>
+                    <Button
+                      variant="primary"
+                      onClick={() => {
+                        void (async () => {
+                          const state = await approvals.recordState(item.entity, item.entityId);
+                          setDetail(state);
+                        })();
+                      }}
+                    >
+                      Details
+                    </Button>
+                  </span>
                 </div>
 
-                {/* The chain position */}
-                {item.chain && item.chain.length > 0 ? (
+                {/* The chain position — inside the accordion body */}
+                {openCardId === item.id && item.chain && item.chain.length > 0 ? (
                   <div className="mt-3">
                     <StepTracker chain={item.chain} actions={item.actions ?? []} status="pending" />
                   </div>
-                ) : (
+                ) : openCardId === item.id ? (
                   <div className="mt-2 text-[12px]" style={{ color: 'var(--muted)' }}>
                     {item.stepName} · step {item.stepOrder} of {item.totalSteps}
                     {trailId === item.id && trail.length > 0 ? (
@@ -315,10 +350,10 @@ export default function ApprovalsPage() {
                       </div>
                     ) : null}
                   </div>
-                )}
+                ) : null}
 
-                {/* Decision footer: note + the three calls */}
-                <div className="mt-3 flex flex-wrap items-center gap-2">
+                {/* Decision footer: note + the three calls (accordion body) */}
+                {openCardId === item.id && (<div className="mt-3 flex flex-wrap items-center gap-2">
                   <input
                     type="text"
                     placeholder="Note for the requester…"
@@ -345,7 +380,7 @@ export default function ApprovalsPage() {
                       Reject
                     </Button>
                   </div>
-                </div>
+                </div>)}
               </div>
             ))}
           </div>
@@ -516,6 +551,7 @@ export default function ApprovalsPage() {
               { key: 'value', label: 'Value', align: 'right' },
               { key: 'last', label: 'Last action' },
               { key: 'track', label: 'Chain' },
+              { key: 'det', label: '', align: 'right' },
               { key: 'when', label: 'Updated' },
             ]}
             rows={history.map((h) => [
@@ -561,6 +597,19 @@ export default function ApprovalsPage() {
                 >
                   {histTrackId === h.id ? 'Hide' : 'Track'}
                 </button>
+              </span>,
+              <span key="det">
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    void (async () => {
+                      const state = await approvals.recordState(h.entity, h.entityId);
+                      setDetail(state);
+                    })();
+                  }}
+                >
+                  Details
+                </Button>
               </span>,
               <span key="w" className="text-[12.5px]" style={{ color: 'var(--muted)' }}>
                 {new Date(h.updatedAt).toLocaleString('en-IN', {

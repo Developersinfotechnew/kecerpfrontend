@@ -1,7 +1,9 @@
 'use client';
 
+import { useState } from 'react';
 import type { RecordApprovalState } from '@/lib/services';
 import { StepTracker } from '@/components/StepTracker';
+import { Lightbox } from '@/components/Lightbox';
 
 /**
  * What is this approval, and where is it now.
@@ -20,6 +22,8 @@ export function ApprovalDetailsModal({
   state: RecordApprovalState;
   onClose: () => void;
 }) {
+  const [lightbox, setLightbox] = useState<{ src: string; name: string } | null>(null);
+
   const r = state.record;
   const statusWord =
     state.status === 'pending'
@@ -120,14 +124,51 @@ export function ApprovalDetailsModal({
                   <span>{new Date(r.raisedAt).toLocaleString('en-IN')}</span>
                 </div>
               ) : null}
-              {r.fields.map((f) => (
+              {r.fields.map((f) => {
+                // Hoist the optional file descriptor so closures keep the
+                // narrowing (property narrowing does not cross into callbacks).
+                const fv = f.file;
+                return (
                 <div key={f.label} className="flex gap-2">
                   <span className="w-44 flex-none" style={{ color: 'var(--muted)' }}>
                     {f.label}
                   </span>
-                  <span className="min-w-0 break-words">{f.value}</span>
+                  {fv ? (
+                    <span className="min-w-0 break-words">
+                      {fv.mimetype.startsWith('image/') ? (
+                        <button
+                          type="button"
+                          onClick={() => setLightbox({ src: fv.url, name: fv.name })}
+                          title={`View ${fv.name}`}
+                          style={{ border: 'none', padding: 0, background: 'none', cursor: 'pointer' }}
+                        >
+                          <img
+                            src={fv.url}
+                            alt={fv.name}
+                            width={72}
+                            style={{ borderRadius: 4, border: '1px solid var(--line)', display: 'block' }}
+                          />
+                        </button>
+                      ) : (
+                        <a
+                          href={fv.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                        >
+                          {fv.name || fv.mimetype}
+                        </a>
+                      )}
+                      <span className="ml-2 text-[11px]" style={{ color: 'var(--muted)' }}>
+                        {fv.mimetype}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="min-w-0 break-words">{f.value}</span>
+                  )}
                 </div>
-              ))}
+              );
+              })}
             </div>
           </div>
 
@@ -159,6 +200,9 @@ export function ApprovalDetailsModal({
           </div>
         </div>
       </div>
+      {lightbox ? (
+        <Lightbox src={lightbox.src} name={lightbox.name} onClose={() => setLightbox(null)} />
+      ) : null}
     </div>
   );
 }

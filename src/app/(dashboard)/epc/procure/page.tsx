@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { RecordForm } from '@/components/RecordForm';
+import { useRowApprovals } from '@/lib/row-approvals';
+import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
 import { Bar, Button, Chip, DataTable, Flow, Notice, PageHead, Panel } from '@/components/ui';
 import { records, vendorScores, type VendorScoreResult } from '@/lib/services';
 import type { RecordRow, RecordType } from '@/lib/types';
@@ -53,6 +55,10 @@ export default function EpcProcurePage() {
   const [poType, setPoType] = useState<RecordType | null>(null);
   const [prs, setPrs] = useState<RecordRow[]>([]);
   const [pos, setPos] = useState<RecordRow[]>([]);
+  // Approval rule: an approved PR / PO shows Details only; before approval it
+  // shows Edit + Details (the backend freezes approved rows for all users).
+  const { isApproved: prApproved, hasChain: prChain, openDetail: prOpen, detail: prDetail, setDetail: setPrDetail, detailBusy: prBusy } = useRowApprovals(PR_KEY, prs);
+  const { isApproved: poApproved, hasChain: poChain, openDetail: poOpen, detail: poDetail, setDetail: setPoDetail, detailBusy: poBusy } = useRowApprovals(PO_KEY, pos);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<{ type: RecordType; row: RecordRow | null } | null>(null);
@@ -207,12 +213,18 @@ export default function EpcProcurePage() {
                     formatDay(r.data.requiredBy),
                     <span key="v" className="num">{`₹${money(Number(r.data.value) || 0)}L`}</span>,
                     <Chip key="s" tone={PR_TONE[stage] ?? 'mute'}>{stage}</Chip>,
-                    <Button
-                      key="edit"
-                      onClick={() => setForm({ type: prType!, row: r })}
-                    >
-                      Edit
-                    </Button>,
+                    <span key="edit" className="flex items-center justify-end gap-2">
+                      {prApproved(r.ref) ? null : (
+                        <Button variant="primary" className="min-w-[90px] justify-center" onClick={() => setForm({ type: prType!, row: r })}>
+                          Edit
+                        </Button>
+                      )}
+                      {prApproved(r.ref) || prChain(r.ref) ? (
+                        <Button variant="primary" className="min-w-[90px] justify-center" disabled={prBusy} onClick={() => void prOpen(r.ref)}>
+                          Details
+                        </Button>
+                      ) : null}
+                    </span>,
                   ];
                 })
           }
@@ -256,12 +268,18 @@ export default function EpcProcurePage() {
                     formatDay(r.data.promised),
                     <Bar key="b" pct={pct} tone={status === 'Delayed' ? 'warn' : undefined} />,
                     <Chip key="s" tone={PO_TONE[status] ?? 'mute'}>{status}</Chip>,
-                    <Button
-                      key="edit"
-                      onClick={() => setForm({ type: poType!, row: r })}
-                    >
-                      Edit
-                    </Button>,
+                    <span key="edit" className="flex items-center justify-end gap-2">
+                      {poApproved(r.ref) ? null : (
+                        <Button variant="primary" className="min-w-[90px] justify-center" onClick={() => setForm({ type: poType!, row: r })}>
+                          Edit
+                        </Button>
+                      )}
+                      {poApproved(r.ref) || poChain(r.ref) ? (
+                        <Button variant="primary" className="min-w-[90px] justify-center" disabled={poBusy} onClick={() => void poOpen(r.ref)}>
+                          Details
+                        </Button>
+                      ) : null}
+                    </span>,
                   ];
                 })
           }
@@ -337,6 +355,8 @@ export default function EpcProcurePage() {
           }}
         />
       ) : null}
+      {prDetail ? <ApprovalDetailsModal state={prDetail} onClose={() => setPrDetail(null)} /> : null}
+      {poDetail ? <ApprovalDetailsModal state={poDetail} onClose={() => setPoDetail(null)} /> : null}
     </>
   );
 }

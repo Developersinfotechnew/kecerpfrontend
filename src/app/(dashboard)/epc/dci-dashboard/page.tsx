@@ -69,7 +69,7 @@ export default function DciDashboardPage() {
           items={[
             { label: 'Total documents', value: String(mis.total), tone: mis.total > 0 ? 'ok' : 'warn' },
             { label: 'WIP', value: String(countOf('WIP')), tone: countOf('WIP') > 0 ? 'warn' : 'ok' },
-            { label: 'Internal review', value: String(countOf('Internal review')) },
+            { label: 'Requesting', value: String(countOf('Requesting')) },
             { label: 'Client review', value: String(countOf('In client review')) },
             { label: 'Approved', value: String(countOf('Approved')), tone: 'ok' },
             { label: 'IFC', value: String(countOf('IFC')), tone: 'ok' },

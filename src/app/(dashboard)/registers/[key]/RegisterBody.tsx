@@ -9,6 +9,7 @@ import { ImportExcelModal } from '@/components/ImportExcelModal';
 import { useProjectData } from '@/lib/project-data';
 import { useSession } from '@/app/session';
 import { records, projects, admin, approvals, type ProjectOption, type RecordApprovalSummary, type RecordApprovalState } from '@/lib/services';
+import { APPROVED_STATUS_WORDS, CHAIN_REGISTER_KEYS, PRE_CHAIN_WORDS } from '@/lib/row-approvals';
 import type { RecordRow, RecordType } from '@/lib/types';
 import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
 
@@ -44,6 +45,9 @@ export default function RegisterBody() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // The row being edited: on a chain register this is the pre-approval Edit
+  // button, and the form under the table saves it back with records.update.
+  const [editing, setEditing] = useState<RecordRow | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   // CR-11: the DPR register opens the create form pre-filled from the day's
   // DSRs. The prefilled values sit here and are handed to the form on open.
@@ -53,6 +57,11 @@ export default function RegisterBody() {
   // next. Shown as an Approval column; the detail modal fetches the full
   // state for one row on click.
   const [approvalStates, setApprovalStates] = useState<Record<string, RecordApprovalSummary>>({});
+  // True only when the bulk states call succeeded. A failed lookup must not
+  // read as "no chain" — the Send-for-approval button shows only when we
+  // positively know the row is chainless.
+  const [statesKnown, setStatesKnown] = useState(false);
+  const [sendBusyRef, setSendBusyRef] = useState<string | null>(null);
   const [detail, setDetail] = useState<RecordApprovalState | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
 
@@ -61,21 +70,42 @@ export default function RegisterBody() {
   useEffect(() => {
     if (rows.length === 0) {
       setApprovalStates({});
+      setStatesKnown(false);
       return;
     }
+    setStatesKnown(false);
     let cancelled = false;
     approvals
       .recordStates(key, rows.map((r) => r.ref))
       .then((states) => {
-        if (!cancelled) setApprovalStates(states ?? {});
+        if (cancelled) return;
+        setApprovalStates(states ?? {});
+        setStatesKnown(true);
       })
       .catch(() => {
-        if (!cancelled) setApprovalStates({});
+        if (cancelled) return;
+        setApprovalStates({});
       });
     return () => {
       cancelled = true;
     };
   }, [key, rows]);
+
+  // Manual send-for-approval: opens the register's chain for a row whose
+  // create-time trigger missed it (row predates the trigger, or the server
+  // was running an older build). Refreshes the rows so the new Under
+  // approval stamp shows immediately.
+  async function sendForApproval(row: RecordRow): Promise<void> {
+    setSendBusyRef(row.ref);
+    try {
+      await approvals.sendForApproval(key, row.ref);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send for approval');
+    } finally {
+      setSendBusyRef(null);
+    }
+  }
 
   async function openDetail(ref: string): Promise<void> {
     setDetailBusy(true);
@@ -116,12 +146,12 @@ export default function RegisterBody() {
 
   const filteredRows = isClientApprovals
     ? rows.filter((r) => {
-        if (statusFilter && String(r.data.status ?? '') !== statusFilter) return false;
-        if (itemTypeFilter && String(r.data.itemType ?? '') !== itemTypeFilter) return false;
-        if (clientFilter && String(r.data.client ?? '') !== clientFilter) return false;
-        if (overdueOnly && !isOverdue(r)) return false;
-        return true;
-      })
+      if (statusFilter && String(r.data.status ?? '') !== statusFilter) return false;
+      if (itemTypeFilter && String(r.data.itemType ?? '') !== itemTypeFilter) return false;
+      if (clientFilter && String(r.data.client ?? '') !== clientFilter) return false;
+      if (overdueOnly && !isOverdue(r)) return false;
+      return true;
+    })
     : rows;
 
   function exportCsv(): void {
@@ -207,41 +237,97 @@ export default function RegisterBody() {
 
   const columns = useMemo(() => {
     if (!type) return [];
-    return type.fields
-      .filter((f) => f.listColumn)
-      .slice(0, 7)
-      .map((f) => ({ key: f.key, label: f.label, align: f.align }));
+    const listColumns = type.fields.filter((f) => f.listColumn);
+    // The approval row rule and the in-flight chip both live on the Status
+    // column, so never cut it: take the first seven, then always append the
+    // status field when a register had more than seven list columns.
+    let cols = listColumns.slice(0, 7);
+    const status = listColumns.find((f) => f.type === 'status');
+    if (status && !cols.some((f) => f.key === status.key)) cols = [...cols, status];
+    return cols.map((f) => ({ key: f.key, label: f.label, align: f.align, type: f.type }));
   }, [type]);
+
+  // Status columns read as chips, not raw words: the same colour language
+  // every approval register uses, so an approved row reads green at a glance.
+  function statusTone(word: string): 'ok' | 'bad' | 'warn' | 'info' | 'mute' {
+    const v = word.toLowerCase();
+    if (/(rejected|reversed|returned|overdue|withdrawn|not achieved)/.test(v)) return 'bad';
+    if (v === 'failed') return 'bad';
+    // A performance test that cleared its witness chain is Achieved (green);
+    // a PR at the Mgmt approval stage cleared its ladder (green). Both sit
+    // before the in-flight amber words below.
+    if (v === 'achieved' || v === 'mgmt approval') return 'ok';
+    // An RFI whose answer chain cleared reads Answered: green, verified.
+    if (v === 'answered') return 'ok';
+    // A document publication that cleared its chain reads Published: green.
+    if (v === 'published') return 'ok';
+    if (v === 'closed') return 'mute';
+    if (/(approved|accepted|passed|issued|verified|cleared|certified|client accepted|client certified|ifc|afc|superseded|active)/.test(v)) return 'ok';
+    // Awaiting certification is an RA bill's in-flight word: amber, with
+    // every other "this is still moving" word.
+    if (/(requesting|waiting|pending|review|progress|query raised|on order|open|acceptance|claimed|approval|raised|awaiting)/.test(v)) return 'warn';
+    return 'info';
+  }
 
   const titleField = type?.titleField ?? '';
 
-  // The Approval column only shows for a register that has live chain state
-  // on at least one row; registers that never open a chain stay clean.
-  const hasApprovals = Object.keys(approvalStates ?? {}).length > 0;
+  // Chain registers always show an Actions column, whether or not a chain is
+  // open on a given row; a non-chain register keeps its clean table.
+  const isChainRegister = CHAIN_REGISTER_KEYS.has(key);
 
-  function approvalCell(r: RecordRow): ReactNode {
+  // Registers whose chain opens on create (or is client-driven) never show
+  // the manual Send button: DSR and DCI already start Requesting on create,
+  // GRNs ride the PO chain.
+  const NO_SEND_KEYS = new Set(['dsr_entries', 'dci_documents', 'goods_receipts']);
+
+  // Hard-settled words: the row's chain business is over, the backend
+  // freezes it, so the UI shows Details only. Rework words (Rejected,
+  // Reversed, Query raised) are NOT in this set — those rows stay editable
+  // so the raiser can fix and resend.
+  const FROZEN_STATUS_WORDS = new Set([
+    'Approved', 'Client accepted', 'Verified', 'Accepted', 'Part accepted',
+    'Passed', 'Issued', 'AFC', 'IFC', 'Superseded', 'Withdrawn',
+    'Active', 'Closed', 'Client certified', 'Cleared', 'Published',
+    // Raise PO settled words: a sanctioned PO has been released or locked
+    // for dispatch — the chain's business is over, the row is Details-only.
+    'Released', 'Locked',
+  ]);
+
+  // Frozen: the live chain approved it, or the row's own word says it is
+  // settled (same rule the backend enforces on update).
+  function rowFrozen(r: RecordRow): boolean {
     const s = approvalStates[r.ref];
-    if (!s) return '—';
-    const word = s.status === 'pending' ? (s.awaitingUser ? 'Returned' : 'Pending') : s.status;
-    const pos =
-      s.status === 'pending' && s.nextStep
-        ? `step ${s.nextStep.order} of ${s.totalSteps} · ${s.nextStep.name}`
-        : s.status === 'pending'
-          ? `step ${s.currentStep} of ${s.totalSteps}`
-          : word;
-    const who = s.nextOwners.length > 0 ? s.nextOwners.join(', ') : '';
+    if (s?.status === 'approved') return true;
+    const word = String(r.data.status ?? '');
+    return FROZEN_STATUS_WORDS.has(word) || APPROVED_STATUS_WORDS.has(word);
+  }
+
+  // Row rule, full: before approval the row shows Edit (+ Details when a
+  // chain is live on it); after approval only Details. A chainless row on a
+  // pre-chain word gets Send-for-approval, which opens the register's chain
+  // manually (rows that predate the create-trigger or an older backend).
+  // Same look as the Goods receipts screen: a row in flight (Under
+  // approval) shows Edit only; a settled row shows Details only; Send for
+  // approval appears on chainless pre-chain words (Draft) as the one path to
+  // start the register's chain.
+  function actionCell(r: RecordRow): ReactNode {
+    const word = String(r.data.status ?? '');
+    const hasChain = approvalStates[r.ref] !== undefined;
+    const frozen = rowFrozen(r);
+    const preChain = word === '' || PRE_CHAIN_WORDS.has(word);
     return (
-      <span className="flex items-center gap-2">
-        <Chip tone={s.status === 'approved' ? 'ok' : s.status === 'rejected' ? 'bad' : 'warn'}>
-          {word}
-        </Chip>
-        <span className="text-[11.5px]" style={{ color: 'var(--muted)' }}>
-          {pos}
-          {who ? ` · ${who}` : ''}
-        </span>
-        <Button onClick={() => void openDetail(r.ref)} disabled={detailBusy}>
-          Details
-        </Button>
+      <span key="act" className="flex justify-end gap-2">
+        {!frozen ? <Button variant="primary" className="min-w-[90px] justify-center" onClick={() => setEditing(r)}>Edit</Button> : null}
+        {frozen || hasChain ? (
+          <Button variant="primary" className="min-w-[90px] justify-center" disabled={detailBusy} onClick={() => void openDetail(r.ref)}>
+            Details
+          </Button>
+        ) : null}
+        {isChainRegister && !NO_SEND_KEYS.has(key) && statesKnown && !hasChain && !frozen && preChain ? (
+          <Button variant="primary" className="min-w-[90px] justify-center" disabled={sendBusyRef === r.ref} onClick={() => void sendForApproval(r)}>
+            {sendBusyRef === r.ref ? 'Sending…' : 'Send for approval'}
+          </Button>
+        ) : null}
       </span>
     );
   }
@@ -363,28 +449,52 @@ export default function RegisterBody() {
               ...(columns.length > 0
                 ? columns
                 : [{ key: titleField, label: type?.label ?? 'Record' }]),
-              ...(hasApprovals ? [{ key: '__approval', label: 'Approval', align: 'left' as const }] : []),
+              ...(isChainRegister
+                ? [
+                  { key: '__actions', label: 'Actions', align: 'right' as const },
+                ]
+                : []),
             ]
           }
           rows={
             filteredRows.length === 0
               ? [
-                  [
-                    ...(columns.length > 0 ? columns : [{ key: titleField, label: '' }]).map(() => '—'),
-                    ...(hasApprovals ? ['—'] : []),
-                  ],
-                ]
+                [
+                  ...(columns.length > 0 ? columns : [{ key: titleField, label: '', align: undefined as string | undefined, type: undefined as string | undefined }]).map(() => '—'),
+                  ...(isChainRegister ? ['—'] : []),
+                ],
+              ]
               : filteredRows.map((r) =>
-                  [
-                    ...(columns.length > 0 ? columns : [{ key: titleField, label: '' }]).map((c) => {
-                      const value = r.data[c.key];
-                      if (value === undefined || value === null || value === '') return '—';
-                      if (typeof value === 'number') return value.toLocaleString();
-                      return String(value);
-                    }),
-                    ...(hasApprovals ? [approvalCell(r)] : []),
-                  ],
-                )
+                [
+                  ...(columns.length > 0 ? columns : [{ key: titleField, label: '', align: undefined as string | undefined, type: undefined as string | undefined }]).map((c) => {
+                    const value = r.data[c.key];
+                    if (value === undefined || value === null || value === '') return '—';
+                    if (typeof value === 'number') return value.toLocaleString();
+                    // Date columns: a stored value is either a bare day
+                    // (2026-10-30) or a full ISO instant (…T00:00:00.000Z)
+                    // from a datetime pick. Both read as 30 Oct 2026.
+                    if (c.type === 'date') {
+                      const d = new Date(String(value));
+                      return Number.isNaN(d.getTime())
+                        ? String(value)
+                        : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+                    }
+                    // Status columns read as coloured chips, not raw words,
+                    // so an approved row is green at a glance (the DSR look).
+                    if (c.type === 'status') {
+                      return (
+                        <Chip key={c.key} tone={statusTone(String(value))}>
+                          {String(value)}
+                        </Chip>
+                      );
+                    }
+                    return String(value);
+                  }),
+                  ...(isChainRegister
+                    ? [<span key="act" className="flex justify-end">{actionCell(r)}</span>]
+                    : []),
+                ],
+              )
           }
         />
       </Panel>
@@ -404,6 +514,19 @@ export default function RegisterBody() {
             await records.create(key, body);
             setCreating(false);
             setPrefill(undefined);
+            void load();
+          }}
+        />
+      ) : null}
+
+      {editing && type ? (
+        <RecordForm
+          type={type}
+          record={editing}
+          onCancel={() => setEditing(null)}
+          onSubmit={async (body) => {
+            await records.update(key, editing.id, body);
+            setEditing(null);
             void load();
           }}
         />

@@ -186,7 +186,7 @@ export default function EpcProcurePlanPage() {
                     <Chip key="s" tone={c.overdue ? 'bad' : c.poIssued ? 'ok' : 'warn'}>
                       {String(d.status ?? 'Planned')}
                     </Chip>,
-                    <Button key="e" onClick={() => { setForm(c.row); setFormOpen(true); }}>Edit</Button>,
+                    <Button key="e" variant="primary" className="min-w-[90px] justify-center" onClick={() => { setForm(c.row); setFormOpen(true); }}>Edit</Button>,
                   ];
                 })
           }

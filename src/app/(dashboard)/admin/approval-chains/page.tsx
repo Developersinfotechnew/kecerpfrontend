@@ -262,7 +262,7 @@ export default function ApprovalChainsPage() {
                     </Chip>
                     {isSuper ? (
                       <>
-                        <Button onClick={() => openEdit(chain)}>Edit</Button>
+                        <Button variant="primary" className="min-w-[90px] justify-center" onClick={() => openEdit(chain)}>Edit</Button>
                         <Button onClick={() => void removeChain(chain)}>Delete</Button>
                       </>
                     ) : null}
