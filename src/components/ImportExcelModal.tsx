@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react';
 
 import { Button, Notice } from '@/components/ui';
+import { excelSerialToISO, parseXlsxGrid, XlsxParseError } from '@/lib/xlsx-parse';
 import type { RecordField, RecordType } from '@/lib/types';
 
 interface ParsedRow {
@@ -16,6 +17,13 @@ interface ImportExcelModalProps {
   type: RecordType;
   /** Create one row. The caller owns the body shape (project scoping, …). */
   create: (data: Record<string, unknown>) => Promise<void>;
+  /**
+   * Bulk create: send many rows in one round-trip. When the caller provides
+   * this, the import runs in 200-row chunks instead of one request per row
+   * (an 800-row schedule = 4 requests, not 800). Falls back to row-by-row
+   * when absent or when a bulk call fails.
+   */
+  createBulk?: (rows: Record<string, unknown>[]) => Promise<void>;
   onClose: () => void;
   onImported: () => void;
 }
@@ -33,7 +41,7 @@ interface ImportExcelModalProps {
  * failed create stops the run at that row so the operator sees exactly what
  * broke. No row is ever silently dropped.
  */
-export function ImportExcelModal({ type, create, onClose, onImported }: ImportExcelModalProps) {
+export function ImportExcelModal({ type, create, createBulk, onClose, onImported }: ImportExcelModalProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileName, setFileName] = useState('');
   const [rows, setRows] = useState<ParsedRow[]>([]);
@@ -49,16 +57,34 @@ export function ImportExcelModal({ type, create, onClose, onImported }: ImportEx
     setParseError(null);
     setFileName(file.name);
 
-    let text: string;
-    try {
-      text = await file.text();
-    } catch {
-      setParseError('Could not read the file. Pick the CSV saved from Excel.');
-      return;
-    }
+    // Binary .xlsx (what Google Sheets' "Download → Microsoft Excel" writes):
+    // unzip + parse in the browser. Everything else reads as text CSV.
+    const ext = file.name.toLowerCase();
+    const isXlsx = ext.endsWith('.xlsx') || ext.endsWith('.xls');
 
-    const delim = detectDelimiter(text);
-    const grid = parseDelimited(text, delim);
+    let grid: string[][];
+    if (isXlsx) {
+      try {
+        grid = await parseXlsxGrid(await file.arrayBuffer());
+      } catch (err) {
+        setParseError(
+          err instanceof XlsxParseError
+            ? err.message
+            : 'Could not read the .xlsx. Try Google Sheets → File → Download → Microsoft Excel (.xlsx), or → CSV.',
+        );
+        return;
+      }
+    } else {
+      let text: string;
+      try {
+        text = await file.text();
+      } catch {
+        setParseError('Could not read the file. Pick the CSV saved from Excel.');
+        return;
+      }
+      const delim = detectDelimiter(text);
+      grid = parseDelimited(text, delim);
+    }
     if (grid.length < 2) {
       setParseError('The file has no data rows. Expected a header row, then one row per record.');
       return;
@@ -82,6 +108,12 @@ export function ImportExcelModal({ type, create, onClose, onImported }: ImportEx
         if (idx === undefined || idx >= cells.length) continue;
         const raw = String(cells[idx] ?? '').trim();
         if (raw === '') continue;
+        // A .xlsx stores dates as serial numbers (45321); turn them into the
+        // ISO days the register expects. CSV text dates already read as ISO.
+        if (isXlsx && f.type === 'date' && /^\d+(\.\d+)?$/.test(raw)) {
+          data[f.key] = excelSerialToISO(Number(raw));
+          continue;
+        }
         data[f.key] = coerce(f, raw);
       }
       return { line: i + 2, data, error: rowError(fields, data) };
@@ -99,6 +131,20 @@ export function ImportExcelModal({ type, create, onClose, onImported }: ImportEx
     setBusy(true);
     let done = 0;
     try {
+      // Fast path: bulk route in 200-row chunks. One sheet of 800 rows is
+      // four requests, not 800.
+      if (createBulk) {
+        let chunkStart = 0;
+        while (chunkStart < toImport.length) {
+          const chunk = toImport.slice(chunkStart, chunkStart + 200);
+          await createBulk(chunk.map((c) => c.data));
+          done += chunk.length;
+          chunkStart += chunk.length;
+        }
+        setResult(`Imported ${done} of ${rows.length} rows.`);
+        onImported();
+        return;
+      }
       for (const r of toImport) {
         await create(r.data);
         done += 1;
@@ -107,7 +153,7 @@ export function ImportExcelModal({ type, create, onClose, onImported }: ImportEx
       onImported();
     } catch (err) {
       setResult(
-        `Stopped at row ${toImport[done].line} after ${done} imported: ${err instanceof Error ? err.message : String(err)}`,
+        `Stopped after ${done} imported: ${err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
       setBusy(false);
@@ -132,7 +178,8 @@ export function ImportExcelModal({ type, create, onClose, onImported }: ImportEx
           <div>
             <h3 className="m-0 text-[14px] font-semibold">Import from Excel — {type.label}</h3>
             <p className="m-0 mt-1 text-[12px]" style={{ color: 'var(--muted)' }}>
-              Save the sheet from Excel as <strong>CSV</strong> (File → Save As → CSV), then pick it here.
+              Pick the sheet file. Google Sheets: File → Download → <strong>CSV (current sheet)</strong>.
+              Excel: Save As → <strong>CSV</strong>. A binary .xlsx/.xls is also parsed in the browser.
               Header row = field names; one row per record.
             </p>
           </div>
@@ -151,7 +198,7 @@ export function ImportExcelModal({ type, create, onClose, onImported }: ImportEx
           <input
             ref={fileRef}
             type="file"
-            accept=".csv,.tsv,.txt"
+            accept=".csv,.tsv,.txt,.xlsx,.xls"
             onChange={(e) => {
               const f = e.target.files?.[0];
               if (f) void handleFile(f);

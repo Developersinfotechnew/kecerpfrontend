@@ -1118,6 +1118,19 @@ export const records = {
     return api(`/records/${key}`, { method: 'POST', body });
   },
 
+  /**
+   * Bulk create: one HTTP round-trip for a whole import chunk. 800+ task
+   * rows must not be 800 requests. Up to 500 rows per call (server cap);
+   * the caller chunks. Every row runs the same validation + scope guard as
+   * a single create; the first bad row stops the run and names its index.
+   */
+  async createBulk(
+    key: string,
+    body: { projectId?: string; rows: Record<string, unknown>[] },
+  ): Promise<{ created: number; refs: string[] }> {
+    return api(`/records/${key}/bulk`, { method: 'POST', body });
+  },
+
   async update(
     key: string,
     id: string,

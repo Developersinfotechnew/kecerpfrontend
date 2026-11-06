@@ -540,6 +540,10 @@ export default function RegisterBody() {
             // import into a scoped register never lands on the wrong project.
             await records.create(key, projectId ? { data, projectId } : { data });
           }}
+          createBulk={async (rowsData) => {
+            // Same one-round-trip bulk path, chunk-safe up to 500 rows.
+            await records.createBulk(key, projectId ? { projectId, rows: rowsData } : { rows: rowsData });
+          }}
           onClose={() => setImportOpen(false)}
           onImported={() => void load()}
         />

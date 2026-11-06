@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { Button, Chip, DataTable, Gantt, GanttLegend, Grid, Notice, PageHead, Panel } from '@/components/ui';
 import { TaskForm } from '@/components/TaskForm';
+import { ImportExcelModal } from '@/components/ImportExcelModal';
+import { PertView } from '@/components/PertView';
 import { useProjectData } from '@/lib/project-data';
 import { records, wbsCpm } from '@/lib/services';
 import { openPrintReport } from '@/lib/print-report';
@@ -20,12 +22,16 @@ export default function EpcPlanningPage() {
   const [tasks, setTasks] = useState<RecordRow[]>([]);
   const [taskError, setTaskError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [cpm, setCpm] = useState<CpmResult | null>(null);
   const [cpmError, setCpmError] = useState<string | null>(null);
   const [milestones, setMilestones] = useState<RecordRow[]>([]);
   // Baseline shows the planned bars only. Actual overlays each activity's
   // completion on top of the same bar, so plan vs done read at a glance.
   const [view, setView] = useState<'baseline' | 'actual'>('baseline');
+  // Requirement 8: the schedule renders as Gantt bars or a PERT network.
+  // Same CpmResult feeds both, so they always agree.
+  const [chart, setChart] = useState<'gantt' | 'pert'>('gantt');
 
   const day = (iso: string) => (iso ? new Date(iso).toLocaleDateString('en-GB') : '—');
 
@@ -199,7 +205,16 @@ export default function EpcPlanningPage() {
             >
               {view === 'actual' ? 'Actual view' : 'Baseline vs actual'}
             </Button>
+            <Button
+              variant={chart === 'gantt' ? 'primary' : 'default'}
+              onClick={() => setChart((c) => (c === 'gantt' ? 'pert' : 'gantt'))}
+            >
+              {chart === 'gantt' ? 'Gantt view' : 'PERT chart'}
+            </Button>
             <Button variant="primary" onClick={() => setAdding(true)}>Add task</Button>
+            <Button onClick={() => setImportOpen(true)} disabled={!taskType}>
+              Import from Excel
+            </Button>
             <Button onClick={() => downloadCriticalPath()} disabled={!cpm}>
               Download critical path (PDF)
             </Button>
@@ -237,34 +252,46 @@ export default function EpcPlanningPage() {
           </Notice>
 
           <Panel
-            title="Schedule"
-            sub={`${cpm.projectStartISO || '—'} — ${cpm.projectFinishISO || '—'} · critical path highlighted`}
+            title={chart === 'pert' ? 'PERT network' : 'Schedule'}
+            sub={`${cpm.projectStartISO || '—'} — ${cpm.projectFinishISO || '—'} · critical path in red`}
             bodyless
           >
-            <Gantt
-              months={ganttMonths(cpm)}
-              todayPct={todayPct(cpm)}
-              actual={view === 'actual'}
-              rows={cpm.activities.map((a) => ({
-                label: `${a.wbsCode} · ${a.description}`,
-                sub: `${a.owner || 'Unassigned'} · float ${a.totalFloat} d · ${a.progress}% done${
-                  a.predecessor ? ` · pred ${a.predecessor} ${a.relType}` : ''
-                }`,
-                startPct: pct(a.earlyStart, cpm.projectStart, cpm.projectFinish),
-                widthPct: widthPct(Math.max(1, a.duration), cpm.projectStart, cpm.projectFinish),
-                tone: a.isCritical ? ('crit' as const) : a.progress > 0 ? ('ok' as const) : ('mute' as const),
-                critical: a.isCritical,
-                progress: a.progress,
-              }))}
-            />
-            <GanttLegend
-              items={[
-                { color: 'var(--red)', label: 'Critical path (zero float)' },
-                { color: 'var(--accent)', label: 'Started, non-critical' },
-                { color: '#b9c4be', label: 'Not started' },
-                { color: 'rgba(0,0,0,0.28)', label: 'Actual progress (dark fill)' },
-              ]}
-            />
+            {chart === 'pert' ? (
+              <>
+                <PertView cpm={cpm} />
+                <p className="m-0 mt-2 text-[12px]" style={{ color: 'var(--muted)' }}>
+                  One node per activity, one edge per predecessor link. Red = critical (zero
+                  float). Node shows duration and total float; scroll horizontally for long chains.
+                </p>
+              </>
+            ) : (
+              <>
+                <Gantt
+                  months={ganttMonths(cpm)}
+                  todayPct={todayPct(cpm)}
+                  actual={view === 'actual'}
+                  rows={cpm.activities.map((a) => ({
+                    label: `${a.wbsCode} · ${a.description}`,
+                    sub: `${a.owner || 'Unassigned'} · float ${a.totalFloat} d · ${a.progress}% done${
+                      a.predecessor ? ` · pred ${a.predecessor} ${a.relType}` : ''
+                    }`,
+                    startPct: pct(a.earlyStart, cpm.projectStart, cpm.projectFinish),
+                    widthPct: widthPct(Math.max(1, a.duration), cpm.projectStart, cpm.projectFinish),
+                    tone: a.isCritical ? ('crit' as const) : a.progress > 0 ? ('ok' as const) : ('mute' as const),
+                    critical: a.isCritical,
+                    progress: a.progress,
+                  }))}
+                />
+                <GanttLegend
+                  items={[
+                    { color: 'var(--red)', label: 'Critical path (zero float)' },
+                    { color: 'var(--accent)', label: 'Started, non-critical' },
+                    { color: '#b9c4be', label: 'Not started' },
+                    { color: 'rgba(0,0,0,0.28)', label: 'Actual progress (dark fill)' },
+                  ]}
+                />
+              </>
+            )}
           </Panel>
 
           <Panel
@@ -399,6 +426,24 @@ export default function EpcPlanningPage() {
           onCreated={() => {
             setAdding(false);
             void loadTasks();
+          }}
+        />
+      ) : null}
+
+      {importOpen && taskType && p ? (
+        <ImportExcelModal
+          type={taskType}
+          create={async (data) => {
+            await records.create(TASKS_KEY, { projectId: p.id, data });
+          }}
+          createBulk={async (rowsData) => {
+            await records.createBulk(TASKS_KEY, { projectId: p.id, rows: rowsData });
+          }}
+          onClose={() => setImportOpen(false)}
+          onImported={() => {
+            setImportOpen(false);
+            void loadTasks();
+            void loadCpm();
           }}
         />
       ) : null}
