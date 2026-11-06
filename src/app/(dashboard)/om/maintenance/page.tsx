@@ -1,3 +1,4 @@
+'use client';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { Button, Chip, DataTable, Grid, PageHead, Panel } from '@/components/ui';
