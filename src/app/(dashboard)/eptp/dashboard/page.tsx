@@ -1,18 +1,34 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
+
 import { Bar, Button, Chip, DataTable, Feed, Grid, KVList, PageHead, Panel } from '@/components/ui';
 
-/** EPTP dashboard — gate governance, WBS progress, deliverables. */
+/**
+ * EPTP dashboard — gate governance, WBS progress, deliverables.
+ * The header buttons and the "Needs attention" items are live entry points:
+ * they open the real action (RFI) register or the service-order register
+ * with the create form ready (?new=1), so an attention row becomes a raised
+ * action in one click.
+ */
 export default function EptpDashboardPage() {
+  const router = useRouter();
+
+  /** Raise a targeted action: open the RFI register create form, subject prefilled. */
+  const raiseAction = (subject: string) => {
+    router.push(`/registers/rfi_register?new=1&subject=${encodeURIComponent(subject)}`);
+  };
+
   return (
-    <>
+    <div className="eptp-dashboard">
+      <style>{EptpDashboardStyles}</style>
       <PageHead
         title="EPTP dashboard"
         description="Narmada Bioenergy LLP — Indore Plant · Bio-CNG 130 TPD. Converts the CRM service order into a controlled Technology, Engineering, Procurement-support and BOQ package for EPC handover."
         actions={
           <>
-            <Button>Service order intake</Button>
-            <Button variant="primary">Raise action</Button>
+            <Button onClick={() => router.push('/registers/crm_deals?new=1')}>Service order intake</Button>
+            <Button variant="primary" onClick={() => raiseAction('')}>Raise action</Button>
           </>
         }
       />
@@ -79,9 +95,34 @@ export default function EptpDashboardPage() {
           <Panel title="Needs attention">
             <Feed
               items={[
-                { tone: 'bad', text: '2 instrumentation datasheets overdue for RFQ readiness', meta: 'Gate G4 at risk', time: '1d' },
-                { tone: 'warn', text: 'Mechanical equipment sizing pending client feed data', meta: 'Core engineering', time: '2d' },
-                { tone: 'info', text: 'Design basis freeze memo issued', meta: 'Technology transfer', time: '1w' },
+                {
+                  tone: 'bad',
+                  time: '1d',
+                  meta: 'Gate G4 at risk',
+                  text: (
+                    <>
+                      2 instrumentation datasheets overdue for RFQ readiness
+                      <button type="button" className="raise-link" onClick={() => raiseAction('Instrumentation datasheets overdue for RFQ readiness — Gate G4 at risk')}>Raise action</button>
+                    </>
+                  ),
+                },
+                {
+                  tone: 'warn',
+                  time: '2d',
+                  meta: 'Core engineering',
+                  text: (
+                    <>
+                      Mechanical equipment sizing pending client feed data
+                      <button type="button" className="raise-link" onClick={() => raiseAction('Mechanical equipment sizing pending client feed data')}>Raise action</button>
+                    </>
+                  ),
+                },
+                {
+                  tone: 'info',
+                  time: '1w',
+                  meta: 'Technology transfer',
+                  text: 'Design basis freeze memo issued',
+                },
               ]}
             />
           </Panel>
@@ -97,6 +138,12 @@ export default function EptpDashboardPage() {
           </Panel>
         </div>
       </Grid>
-    </>
+    </div>
   );
 }
+
+const EptpDashboardStyles = `
+.eptp-dashboard .raise-link{margin-left:10px;padding:0;border:0;background:none;cursor:pointer;font-size:12px;font-weight:600;color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.eptp-dashboard .raise-link:hover{color:var(--accent-dark)}
+`;
+

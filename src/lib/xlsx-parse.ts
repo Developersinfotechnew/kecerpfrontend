@@ -28,7 +28,7 @@ function findEndOfCentralDirectory(buf: Uint8Array): number {
   const min = Math.max(0, buf.length - 22 - 65535);
   for (let i = buf.length - 22; i >= min; i -= 1) {
     const v = buf.subarray(i, i + 4);
-    if (v[0] === 0x50 && v[1] === 0x4b && v[2] === 0x06 && v[3] === 0x05) return i;
+    if (v[0] === 0x50 && v[1] === 0x4b && v[2] === 0x05 && v[3] === 0x06) return i;
   }
   return -1;
 }

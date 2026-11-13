@@ -179,11 +179,10 @@ export default function DashboardLayout({
     for (const p of projects) for (const stage of p.enabledStages ?? []) live.add(stage);
     const out = new Set<string>();
     for (const s of SERVICE_SUITES) if (!live.has(s)) out.add(s);
-    // EPTP and O&M are disabled for now, regardless of the project's enabled
-    // phases: the suites stay fully intact (nav rows, registers, code), only
-    // the sidebar pill is greyed so the client focuses on EPC + PMC. Remove
-    // these two lines to switch them back on.
-    out.add('eptp');
+    // O&M is disabled for now, regardless of the project's enabled phases:
+    // the suite stays fully intact (nav rows, registers, code), only the
+    // sidebar pill is greyed so the client focuses on EPC + PMC + EPTP.
+    // Remove this line to switch O&M back on.
     out.add('om');
     return out;
   }, [scope, scopeProjects]);

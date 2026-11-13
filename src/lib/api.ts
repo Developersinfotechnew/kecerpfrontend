@@ -92,6 +92,11 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   // Attempt the refresh on any 401, including cold sessions where accessToken
   // is still null (new tab, hard refresh). The httpOnly cookie carries the
   // refresh token; if it is absent or invalid the refresh fails and we bounce.
+  const payload = (await response.json().catch(() => null)) as
+    | { ok: true; data: T }
+    | { ok: false; error: ApiError }
+    | null;
+
   if (response.status === 401 && !noRetry) {
     const refreshed = await tryRefresh();
     if (refreshed) {
@@ -103,13 +108,15 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
       window.location.href = '/login';
     }
-    throw new ApiRequestError(401, { code: 'UNAUTHENTICATED', message: 'Session expired' });
+    // Preserve the backend's real 401 message. A wrong password is a 401, and
+    // the body says "Email or password is incorrect" — masking that as
+    // "Session expired" is what made a login failure look like a session bug
+    // (and triggered the lockout, since the user kept "retrying the session").
+    const error = payload && payload.ok === false
+      ? payload.error
+      : { code: 'UNAUTHENTICATED' as const, message: 'Session expired' };
+    throw new ApiRequestError(401, error);
   }
-
-  const payload = (await response.json().catch(() => null)) as
-    | { ok: true; data: T }
-    | { ok: false; error: ApiError }
-    | null;
 
   if (!response.ok || !payload || payload.ok === false) {
     const error = payload && payload.ok === false ? payload.error : {
@@ -222,6 +229,11 @@ export async function apiMultipart<T>(
     body: form,
   });
 
+  const payload = (await response.json().catch(() => null)) as
+    | { ok: true; data: T }
+    | { ok: false; error: ApiError }
+    | null;
+
   if (response.status === 401 && !noRetry) {
     const refreshed = await tryRefresh();
     if (refreshed) {
@@ -230,13 +242,11 @@ export async function apiMultipart<T>(
     if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
       window.location.href = '/login';
     }
-    throw new ApiRequestError(401, { code: 'UNAUTHENTICATED', message: 'Session expired' });
+    const error = payload && payload.ok === false
+      ? payload.error
+      : { code: 'UNAUTHENTICATED' as const, message: 'Session expired' };
+    throw new ApiRequestError(401, error);
   }
-
-  const payload = (await response.json().catch(() => null)) as
-    | { ok: true; data: T }
-    | { ok: false; error: ApiError }
-    | null;
 
   if (!response.ok || !payload || payload.ok === false) {
     const error = payload && payload.ok === false ? payload.error : {

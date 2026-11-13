@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams, useRouter } from 'next/navigation';
 
 import { Button, Chip, DataTable, Notice, PageHead, Panel } from '@/components/ui';
 import { RecordForm } from '@/components/RecordForm';
@@ -23,6 +23,29 @@ import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
 export default function RegisterBody() {
   const params = useParams<{ key: string }>();
   const key = params.key ?? '';
+  const searchParams = useSearchParams();
+  const router = useRouter();
+
+  /** "Raise action" style entry points: ?new=1 opens the create form on load.
+ *  An optional ?subject=<text> pre-fills the record's title field, so a
+ *  dashboard "Needs attention" row can raise a targeted action in one click. */
+  useEffect(() => {
+    if (searchParams.get('new') === '1') {
+      const subject = searchParams.get('subject');
+      if (subject) {
+        // The register's title field is declared in its metadata; fall back to
+        // 'subject' (the RFI/action registers all title on that field).
+        setPrefill({ subject });
+      }
+      setCreating(true);
+      const next = new URLSearchParams(searchParams);
+      next.delete('new');
+      next.delete('subject');
+      router.replace(`?${next.toString()}`, { scroll: false });
+    }
+    // run once per register: the param is cleared after the first open
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
 
   const { loading: sessionLoading } = useSession();
   const { current } = useProjectData();
