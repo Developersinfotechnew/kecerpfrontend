@@ -501,6 +501,7 @@ function Overview({
   return (
     <>
       <KpiGrid
+        cols={5}
         items={[
           { label: 'BOQ items', value: String(boq.length) },
           { label: 'BOQ value', value: `₹${inr(boqValue)}` },

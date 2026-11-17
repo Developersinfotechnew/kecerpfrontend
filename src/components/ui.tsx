@@ -627,15 +627,19 @@ export function DataTable({
 
 export function KpiGrid({
   items,
+  cols = 4,
 }: {
   items: { label: string; value: string; note?: string; tone?: 'good' | 'warn' | 'bad' }[];
+  /** Desktop column count; the default keeps the classic four-card band. */
+  cols?: 2 | 3 | 4 | 5;
 }) {
   const toneColor = (t?: 'good' | 'warn' | 'bad') =>
     t === 'bad' ? 'var(--danger)' : t === 'warn' ? 'var(--warn)' : t === 'good' ? 'var(--ok)' : undefined;
+  const lgCls = { 2: 'lg:grid-cols-2', 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5' }[cols];
 
   return (
     <div
-      className="grid gap-px grid-cols-2 lg:grid-cols-4"
+      className={`grid gap-px grid-cols-2 ${lgCls}`}
       style={{ background: 'var(--line-2)' }}
     >
       {items.map((it, i) => (
