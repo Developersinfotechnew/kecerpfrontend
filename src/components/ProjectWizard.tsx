@@ -316,7 +316,12 @@ export function ProjectWizard({
                     </select>
                   </Field>
                   <Field label="Capacity (TPD)">
-                    <input className={inputCls} style={inputStyle} type="number" min="0" value={d.capacityTpd} onChange={(e) => set('capacityTpd', e.target.value)} placeholder="4.8" />
+                    <select className={inputCls} style={inputStyle} value={d.capacityTpd} onChange={(e) => set('capacityTpd', e.target.value)}>
+                      <option value="">Select capacity…</option>
+                      {['2.4', '3', '4.8', '7.2', '10', '12', '27'].map((v) => (
+                        <option key={v} value={v}>{v} TPD</option>
+                      ))}
+                    </select>
                   </Field>
                 </div>
               </SectionGroup>

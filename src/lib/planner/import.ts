@@ -8,6 +8,7 @@
  * In Progress = 50, Pending = 0); Remarks is kept on the task.
  */
 import { PTask, newTask } from './engine';
+import { excelSerialToISO } from '../xlsx-parse';
 
 export interface ImportResult {
   roots: PTask[];
@@ -35,9 +36,29 @@ const statusToPct = (raw: string): number => {
   return 0;
 };
 
+/**
+ * "Start Month (approx.)" → a day offset from project start. The client writes
+ * a month position (3 = month 3) or, occasionally, a real Excel date serial
+ * (e.g. 46266). A serial has no reference point to convert against, so it is
+ * dropped (offset 0) and flagged; a month position becomes (m−1)·30 days.
+ */
+const parseStartOffset = (raw: string): { off: number; note: string | null } => {
+  const t = raw.trim();
+  if (!t) return { off: 0, note: null };
+  const n = Number(t);
+  if (Number.isNaN(n)) return { off: 0, note: `Start month "${t}" not a number — kept at project start` };
+  if (n >= 20000) return { off: 0, note: `Start "${t}" looks like the date ${excelSerialToISO(n)}, not a month position — kept at project start` };
+  return { off: Math.max(0, Math.round((n - 1) * 30)), note: null };
+};
+
 /** Header cell → role. Loose matching: the client sheet renames columns often. */
-function roleOf(header: string): 'num' | 'name' | 'dur' | 'dep' | 'status' | 'rem' | null {
+function roleOf(header: string): 'num' | 'name' | 'dur' | 'dep' | 'status' | 'rem' | 'off' | null {
+  // (role set is the import's; "end month" is not read — finish is computed)
   const h = header.toLowerCase();
+  // "Start Month (approx.)" staggers the schedule — the client's own way of
+  // saying when each phase starts; mapped to a day offset (Finish is computed
+  // from offset + duration, so no separate end column is read).
+  if (/start/.test(h) && /month/.test(h)) return 'off';
   if (/sr|task|no\.?\s*$/.test(h) && !/descript/.test(h)) return 'num';
   if (/activity|descript|work\s?scope|^name$|phase/.test(h)) return 'name';
   if (/duration|dur/.test(h)) return 'dur';
@@ -52,7 +73,7 @@ function roleOf(header: string): 'num' | 'name' | 'dur' | 'dep' | 'status' | 're
  * column and a description column. Returns the row index + column indices by role.
  */
 function findHeader(grid: string[][]): { roles: Record<string, number>; row: number } | null {
-  for (let r = 0; r < Math.min(12, grid.length); r += 1) {
+  for (let r = 0; r < Math.min(25, grid.length); r += 1) {
     const roles: Record<string, number> = {};
     grid[r].forEach((cell, c) => {
       const role = roleOf(String(cell ?? '').trim());
@@ -76,7 +97,15 @@ export function importScheduleGrid(grid: string[][]): ImportResult {
   const found = findHeader(grid);
   const skipped: string[] = [];
   if (!found) {
-    skipped.push('No header row with task numbers + descriptions found.');
+    // Surface what we saw so a missed header is diagnosable, not a mystery:
+    // the first few non-empty lines, truncated.
+    const preview = grid
+      .slice(0, 8)
+      .map((r) => r.map((c) => c.slice(0, 14)).filter(Boolean).join(' | '))
+      .filter(Boolean)
+      .slice(0, 5)
+      .join('  //  ');
+    skipped.push(`No header row with task numbers + descriptions found. First lines: ${preview || '(sheet is empty)'}`);
     return { roots: [], phases: 0, tasks: 0, skipped };
   }
   const { roles, row: headerRow } = found;
@@ -85,9 +114,10 @@ export function importScheduleGrid(grid: string[][]): ImportResult {
   const byNum = new Map<string, PTask>();
   const roots: PTask[] = [];
 
-  const addNode = (num: string, name: string, dur: number, depRaw: string, status: string, rem: string): void => {
+  const addNode = (num: string, name: string, dur: number, depRaw: string, status: string, rem: string, off: number): void => {
     const node = newTask(name, dur, statusToPct(status));
     node.rem = rem;
+    if (off > 0) node.off = off;
     byNum.set(num, node);
     const parentNum = num.includes('.') ? num.slice(0, num.lastIndexOf('.')) : null;
     if (parentNum) {
@@ -111,6 +141,7 @@ export function importScheduleGrid(grid: string[][]): ImportResult {
 
   let phases = 0;
   let tasks = 0;
+  let noDur = 0;
 
   for (let r = headerRow + 1; r < grid.length; r += 1) {
     const row = grid[r] ?? [];
@@ -124,13 +155,22 @@ export function importScheduleGrid(grid: string[][]): ImportResult {
     }
 
     const rawDur = Number(cell(row, col('dur')) || 0);
-    if (!(rawDur >= 1)) skipped.push(`Row ${num}: no duration, defaulted to 1 day`);
+    // Phase-numbered rows ("1", "2") may have no duration of their own — they
+    // become summaries whose span the engine derives from the sub-rows. Leaf
+    // rows without a duration default to 1 day; count them and say it once.
+    if (!(rawDur >= 1) && !isPhaseNum) noDur += 1;
     const dur = Math.max(1, Math.round(rawDur || 1));
 
-    addNode(cleanNum(num), name, dur, cell(row, col('dep')), cell(row, col('status')), cell(row, col('rem')));
+    const startCol = cell(row, col('off'));
+    const offRes = parseStartOffset(startCol);
+    if (offRes.note) skipped.push(`Row ${num}: ${offRes.note}`);
+
+    addNode(cleanNum(num), name, dur, cell(row, col('dep')), cell(row, col('status')), cell(row, col('rem')), offRes.off);
     if (isPhaseNum) phases += 1;
     else tasks += 1;
   }
+
+  if (noDur > 0) skipped.push(`${noDur} row(s) had no duration — defaulted to 1 day`);
 
   return { roots, phases, tasks, skipped };
 }

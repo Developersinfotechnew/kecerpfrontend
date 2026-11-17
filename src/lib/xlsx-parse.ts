@@ -117,35 +117,35 @@ function parseSharedStrings(xml: string | null): string[] {
   return out;
 }
 
-/** First worksheet of the workbook, as a string grid. */
-export async function parseXlsxGrid(buf: ArrayBuffer | Uint8Array): Promise<XlsxCsvGrid> {
-  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  const eocd = findEndOfCentralDirectory(bytes);
-  if (eocd < 0) {
-    throw new XlsxParseError('This file is not a valid .xlsx. Google Sheets: File → Download → "Microsoft Excel (.xlsx)". Legacy .xls is not supported — re-save it.');
-  }
-  const entries = listEntries(bytes, eocd);
+/** One named worksheet of the workbook, as a string grid. */
+export interface XlsxSheet {
+  name: string;
+  grid: XlsxCsvGrid;
+}
 
-  const shared = parseSharedStrings(await entryText(bytes, entries, 'xl/sharedStrings.xml'));
-
-  // The first sheet of the workbook. xl/workbook.xml names them; the safest
-  // generic pick is the first xl/worksheets/sheet*.xml, which is sheet1 for
-  // files Google Sheets or Excel write.
-  const sheetNames = entries
+/**
+ * The workbook's tab names, in display order. xl/workbook.xml lists them
+ * (sheet1, sheet2, … in file order); we pair them by index with the
+ * xl/worksheets/sheetN.xml parts, which is how Excel and Google Sheets both
+ * write them.
+ */
+function sheetNamesFor(entries: ZipEntry[], workbookXml: string | null): string[] {
+  const files = entries
     .filter((e) => /^xl\/worksheets\/sheet\d+\.xml$/.test(e.name))
     .sort((a, b) => {
       const na = Number(a.name.match(/\d+/)?.[0] ?? 0);
       const nb = Number(b.name.match(/\d+/)?.[0] ?? 0);
       return na - nb;
     });
-  const sheet = sheetNames[0];
-  if (!sheet) {
-    throw new XlsxParseError('No worksheet found in the .xlsx. Pick the sheet file, not the folder.');
+  const names: string[] = [];
+  if (workbookXml) {
+    const doc = new DOMParser().parseFromString(workbookXml, 'application/xml');
+    doc.querySelectorAll('sheet').forEach((s) => names.push(String(s.getAttribute('name') ?? '')));
   }
+  return files.map((f, i) => names[i] || f.name.replace(/^xl\/worksheets\/|\.xml$/g, ''));
+}
 
-  const xml = await entryText(bytes, entries, sheet.name);
-  if (xml === null) throw new XlsxParseError(`Worksheet part missing (${sheet.name}).`);
-
+function parseSheetXml(xml: string, shared: string[]): XlsxCsvGrid {
   const doc = new DOMParser().parseFromString(xml, 'application/xml');
   const grid: string[][] = [];
 
@@ -171,6 +171,57 @@ export async function parseXlsxGrid(buf: ArrayBuffer | Uint8Array): Promise<Xlsx
   });
 
   return grid.filter((r) => r.some((c) => c !== ''));
+}
+
+/** Every worksheet of the workbook (name + grid), in display order. */
+export async function parseXlsxSheets(buf: ArrayBuffer | Uint8Array): Promise<XlsxSheet[]> {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  const eocd = findEndOfCentralDirectory(bytes);
+  if (eocd < 0) {
+    throw new XlsxParseError('This file is not a valid .xlsx. Google Sheets: File → Download → "Microsoft Excel (.xlsx)". Legacy .xls is not supported — re-save it.');
+  }
+  const entries = listEntries(bytes, eocd);
+
+  const shared = parseSharedStrings(await entryText(bytes, entries, 'xl/sharedStrings.xml'));
+  const workbookXml = await entryText(bytes, entries, 'xl/workbook.xml');
+  const names = sheetNamesFor(entries, workbookXml);
+  if (names.length === 0) {
+    throw new XlsxParseError('No worksheet found in the .xlsx. Pick the sheet file, not the folder.');
+  }
+
+  const files = entries
+    .filter((e) => /^xl\/worksheets\/sheet\d+\.xml$/.test(e.name))
+    .sort((a, b) => {
+      const na = Number(a.name.match(/\d+/)?.[0] ?? 0);
+      const nb = Number(b.name.match(/\d+/)?.[0] ?? 0);
+      return na - nb;
+    });
+
+  const out: XlsxSheet[] = [];
+  for (let i = 0; i < files.length; i += 1) {
+    const xml = await entryText(bytes, entries, files[i].name);
+    if (xml === null) continue;
+    out.push({ name: names[i] ?? `Sheet ${i + 1}`, grid: parseSheetXml(xml, shared) });
+  }
+  return out;
+}
+
+/**
+ * First worksheet of the workbook (or the one named `sheetName`, when a
+ * multi-tab file needs a specific tab — e.g. the client's "Project Schedule,
+ * L2" tab of a workbook that also holds L1).
+ */
+export async function parseXlsxGrid(buf: ArrayBuffer | Uint8Array, sheetName?: string): Promise<XlsxCsvGrid> {
+  const sheets = await parseXlsxSheets(buf);
+  if (sheetName === undefined) return sheets[0]?.grid ?? [];
+  const hit = sheets.find((s) => s.name === sheetName);
+  if (!hit) throw new XlsxParseError(`Tab "${sheetName}" not found in the workbook.`);
+  return hit.grid;
+}
+
+/** The workbook's tab names, for the import sheet picker. */
+export async function listXlsxSheets(buf: ArrayBuffer | Uint8Array): Promise<string[]> {
+  return (await parseXlsxSheets(buf)).map((s) => s.name);
 }
 
 /**

@@ -34,6 +34,19 @@ export interface PTask {
   open: boolean;
   /** Free-text remarks (the client schedule's Remarks column). */
   rem?: string;
+  /**
+   * Actuals (the client's hand-note: Actual Start / Actual Finish). ISO
+   * yyyy-mm-dd or '' — editable even after the baseline is frozen. Delay is
+   * derived: actual finish − plan finish, in days.
+   */
+  as?: string;
+  ae?: string;
+  /**
+   * Earliest-start offset in days from the project start. The client's L1
+   * sheets stagger phases by "Start Month" (task 7 starts month 5); the
+   * importer converts that to days. 0/undefined = start as CPM dictates.
+   */
+  off?: number;
   /** Child tasks. Empty = leaf; non-empty = summary/phase. */
   kids: PTask[];
   /** Back-pointer, maintained by the tree helpers. null for top-level. */
@@ -232,7 +245,9 @@ export function compute(roots: PTask[], startDate: string): ComputeResult {
     if (es.has(id)) return es.get(id)!;
     if (visiting.has(id)) return 0; // cycle guard: break the loop, keep a value
     visiting.add(id);
-    let s = 0;
+    // The node's own offset (imported "Start Month") floors its start; the
+    // predecessor chain can push it later, never earlier.
+    let s = byId.get(id)?.off ?? 0;
     for (const q of pl.get(id) ?? []) s = Math.max(s, calcEs(q) + (byId.get(q)?.dur ?? 0));
     visiting.delete(id);
     es.set(id, s);
@@ -281,9 +296,13 @@ export function compute(roots: PTask[], startDate: string): ComputeResult {
       const dur = Math.max(span, 1);
       const w = ids.reduce((a, id) => a + (byId.get(id)?.dur ?? 0), 0);
       const pct = w ? Math.round(ids.reduce((a, id) => a + (byId.get(id)?.dur ?? 0) * (byId.get(id)?.pct ?? 0), 0) / w) : 0;
+      // The summary's Late Finish comes from its most constrained child (the
+      // child LF that the summary must not pass), so float = lf - es - dur
+      // shows the phase's real slack instead of always 0.
+      const lfMax = Math.max(...ids.map((id) => lf.get(id) ?? end));
       c.set(t.id, {
         wbs: t.wbs!, depth: t.depth!, lv: ids,
-        es: esMin, lf: esMin + span, crit: false, dur, pct,
+        es: esMin, lf: lfMax, crit: false, dur, pct,
         start: new Date(p0.getTime() + esMin * DAY),
         finish: new Date(p0.getTime() + (esMin + dur - 1) * DAY),
         isPhase: true,

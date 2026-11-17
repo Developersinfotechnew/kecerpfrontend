@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Button, Notice, PageHead } from '@/components/ui';
-import { compute, loadSample, newTask, PTask, setNextId } from '@/lib/planner/engine';
+import { compute, newTask, PTask, setNextId } from '@/lib/planner/engine';
 import { importScheduleGrid } from '@/lib/planner/import';
-import { parseXlsxGrid, XlsxParseError } from '@/lib/xlsx-parse';
+import { parseXlsxSheets, XlsxParseError, XlsxCsvGrid } from '@/lib/xlsx-parse';
 import { projects, records } from '@/lib/services';
 import type { ProjectOption } from '@/lib/services';
+import { useSession } from '@/app/session';
 import type { RecordRow } from '@/lib/types';
 
 /**
@@ -33,13 +34,19 @@ interface PlanNode {
   pred: number[];
   open: boolean;
   rem?: string;
+  as?: string;
+  ae?: string;
+  /** Start offset in days from project start (imported "Start Month"). */
+  off?: number;
+  /** Plan status: 'draft' editable, 'approved' baseline frozen. */
+  st?: string;
 }
 
 function serialize(roots: PTask[]): string {
   const out: PlanNode[] = [];
   const walk = (list: PTask[]): void => {
     for (const t of list) {
-      out.push({ id: t.id, p: t.parent?.id ?? null, name: t.name, dur: t.dur, pct: t.pct, pred: [...t.pred], open: t.open, rem: t.rem ?? '' });
+      out.push({ id: t.id, p: t.parent?.id ?? null, name: t.name, dur: t.dur, pct: t.pct, pred: [...t.pred], open: t.open, rem: t.rem ?? '', as: t.as ?? '', ae: t.ae ?? '', off: t.off ?? 0 });
       walk(t.kids);
     }
   };
@@ -52,7 +59,7 @@ function hydrate(json: string): PTask[] {
   const byId = new Map<number, PTask>();
   const roots: PTask[] = [];
   for (const n of nodes) {
-    const t: PTask = { id: n.id, name: n.name, dur: Math.max(1, n.dur), pct: n.pct, pred: [...n.pred], open: n.open, rem: n.rem ?? '', kids: [], parent: null };
+    const t: PTask = { id: n.id, name: n.name, dur: Math.max(1, n.dur), pct: n.pct, pred: [...n.pred], open: n.open, rem: n.rem ?? '', as: n.as ?? '', ae: n.ae ?? '', off: n.off ? Math.round(n.off) : undefined, kids: [], parent: null };
     byId.set(n.id, t);
     if (n.p === null || !byId.has(n.p)) roots.push(t);
   }
@@ -110,12 +117,24 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   /** 'l1' = the client schedule-table format (Task / Descriptions / … / Remarks); 'gantt' = the chart view. */
   const [view, setView] = useState<'l1' | 'gantt'>('l1');
   const [msg, setMsg] = useState<string | null>(null);
+  const [msgTone, setMsgTone] = useState<'info' | 'ok' | 'warn' | 'err'>('info');
+  const say = (m: string | null, tone: 'info' | 'ok' | 'warn' | 'err' = 'info') => { setMsg(m); setMsgTone(m ? tone : 'info'); };
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  /**
+   * Baseline approval (client spec): null = draft — plan fields editable.
+   * Non-null = CEO / super admin approved it, so every plan column (Task no.
+   * through plan End) freezes; actuals, % and delay stay live.
+   */
+  const [approvedBy, setApprovedBy] = useState<string | null>(null);
+  const { user } = useSession();
+  const canApprove = user?.role === 'superadmin' || user?.role === 'ceo';
+  const frozen = approvedBy !== null;
   const readyRef = useRef(false); // true only after the plan load for the current project finished
+  /** An imported plan has no record row yet — the auto-save effect must create one. */
+  const pendingCreate = useRef(false);
 
-  const leftRef = useRef<HTMLDivElement>(null);
-  const rightRef = useRef<HTMLDivElement>(null);
   const l1Ref = useRef<HTMLDivElement>(null);
+  const unifiedRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const bump = useCallback((): void => setRev((r) => r + 1), []);
@@ -126,24 +145,6 @@ export default function ProjectPlannerPage(): React.JSX.Element {
     return compute(roots, startDate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roots, startDate, rev]);
-
-  // ── load the sample on first mount so the screen is never empty ───────
-
-  const loadSampleData = useCallback((): void => {
-    const s = loadSample();
-    setRoots(s.roots);
-    setStartDate(s.startDate);
-    setPlanRowId(null);
-    setPlanName('Sample (spec §9)');
-    setSel(0);
-    setSaveState('idle');
-    bump();
-  }, [bump]);
-
-  useEffect(() => {
-    loadSampleData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // ── project list + saved plans (F9) ────────────────────────────────────
 
@@ -180,9 +181,11 @@ export default function ProjectPlannerPage(): React.JSX.Element {
           setStartDate(String(latest.data.startDate ?? startDate));
           setPlanName(String(latest.data.name ?? 'Plan'));
           setPlanRowId(latest.id);
+          setApprovedBy(latest.data.status === 'approved' ? String(latest.data.approvedBy ?? 'approved') : null);
         } else {
-          // No saved plan for this project yet: start from the spec sample.
-          loadSampleData();
+          setApprovedBy(null);
+          // No saved plan for this project yet: start blank, import from Excel.
+          setRoots([]);
         }
         setSaveState('idle');
         setMsg(null);
@@ -190,7 +193,7 @@ export default function ProjectPlannerPage(): React.JSX.Element {
         if (!cancelled) {
           setSavedPlans([]);
           readyRef.current = true;
-          loadSampleData();
+          setRoots([]);
         }
       }
     })();
@@ -204,6 +207,7 @@ export default function ProjectPlannerPage(): React.JSX.Element {
     (row: RecordRow): void => {
       const plan = String(row.data.plan ?? '');
       if (!plan) return;
+      setApprovedBy(row.data.status === 'approved' ? String(row.data.approvedBy ?? 'approved') : null);
       setRoots(hydrate(plan));
       setStartDate(String(row.data.startDate ?? startDate));
       setPlanName(String(row.data.name ?? 'Plan'));
@@ -217,10 +221,9 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   );
 
   const newBlankPlan = useCallback((): void => {
-    const phase = newTask('Phase 1', 1, 0);
-    phase.kids.push(newTask('Task 1.1', 5, 0));
-    setRoots([phase]);
+    setRoots([]);
     setPlanRowId(null);
+    setApprovedBy(null);
     setPlanName('New plan');
     setSel(0);
     setSaveState('idle');
@@ -234,15 +237,20 @@ export default function ProjectPlannerPage(): React.JSX.Element {
     try {
       if (!projectId) {
         setSaveState('error');
-        setMsg('Pick a project first — a plan belongs to a project.');
+        say('Pick a project first — a plan belongs to a project.', 'err');
         return;
       }
+      // The register's startDate is required. The engine treats a blank
+      // start as "today", so a plan that never set one still saves.
+      const today = new Date().toISOString().slice(0, 10);
       const body: Record<string, unknown> = {
         data: {
           name: planName,
-          startDate,
+          startDate: startDate || today,
           plan: serialize(roots),
           project: projectId,
+          status: approvedBy ? 'approved' : 'draft',
+          ...(approvedBy ? { approvedBy } : {}),
         },
         projectId,
       };
@@ -264,60 +272,136 @@ export default function ProjectPlannerPage(): React.JSX.Element {
     } catch (err) {
       setSaveState('error');
       if (!silent) {
-        setMsg(`Save failed: ${err instanceof Error ? err.message : 'unknown error'}. If the register is not seeded, push the backend seed and restart it.`);
+        say(`Save failed: ${err instanceof Error ? err.message : 'unknown error'}. If the register is not seeded, push the backend seed and restart it.`, 'err');
       }
     }
-  }, [planName, planRowId, projectId, res, roots, startDate]);
+  }, [planName, planRowId, projectId, res, roots, startDate, approvedBy]);
 
-  /** Read the client's .xlsx/.csv L1 schedule into the live tree. */
+  /** Approve the baseline: freeze every plan column, keep actuals live. */
+  const approveBaseline = (): void => {
+    const stamp = `${user?.name ?? user?.email ?? 'approved'} · ${new Date().toLocaleString('en-GB')}`;
+    if (!window.confirm(`Approve this baseline? Plan fields (task no., duration, dependencies, float, plan start/finish) will freeze for everyone. Actual start/finish, % complete and delay stay editable.`)) return;
+    setApprovedBy(stamp);
+    setMsg(null);
+    void doSave(true);
+  };
+
+  /** Reopen after approval: unlocks plan fields for a further revision. */
+  const reopenBaseline = (): void => {
+    if (!window.confirm('Reopen the plan for editing? This un-freezes the plan fields.')) return;
+    setApprovedBy(null);
+    setMsg(null);
+    void doSave(true);
+  };
+
+  /**
+   * The client's workbook holds both tabs ("Project Schedule, L1" and
+   * "Project Schedule, L2"). importExcel parses every tab; when more than one
+   * exists it opens a picker (sheetPick) and finishImport does the work.
+   */
+  const [sheetPick, setSheetPick] = useState<{ file: File; sheets: { name: string; grid: XlsxCsvGrid }[] } | null>(null);
+
+  /** Read the client's .xlsx/.csv schedule into the live tree (with tab pick). */
   const importExcel = async (file: File): Promise<void> => {
     setMsg(null);
     try {
       const buf = await file.arrayBuffer();
       const ext = (file.name.split('.').pop() ?? '').toLowerCase();
-      let grid: string[][];
       if (ext === 'csv' || ext === 'tsv' || ext === 'txt') {
         const text = await file.text();
         const delim = text.includes('\t') ? '\t' : ',';
-        grid = text
+        const grid = text
           .split(/\r?\n/)
           .filter((l) => l.trim())
           .map((l) => l.split(delim).map((c) => c.replace(/^"|"$/g, '').trim()));
+        await finishImport(file, grid);
       } else {
-        grid = await parseXlsxGrid(buf);
+        const sheets = await parseXlsxSheets(buf);
+        // Empty tabs (a workbook's trailing "Sheet1") are skipped so the
+        // picker only offers tabs that actually hold rows.
+        const usable = sheets.filter((s) => s.grid.length > 0);
+        if (usable.length === 0) {
+          say(`Import found no usable tab in ${file.name} — all ${sheets.length} tab(s) are empty.`, 'err');
+        } else if (usable.length === 1) {
+          await finishImport(file, usable[0].grid, usable[0].name);
+        } else {
+          setSheetPick({ file, sheets: usable });
+        }
       }
+    } catch (err) {
+      say(`Import failed: ${err instanceof XlsxParseError ? err.message : err instanceof Error ? err.message : 'unknown error'}. For .xlsx re-save as Microsoft Excel (.xlsx); legacy .xls is not supported.`, 'err');
+    }
+  };
+
+  const finishImport = async (file: File, grid: string[][], sheetLabel?: string): Promise<void> => {
+    setMsg(null);
+    setSheetPick(null);
+    try {
       const res2 = importScheduleGrid(grid);
       if (res2.roots.length === 0) {
-        setMsg(`Import found no tasks. ${res2.skipped.slice(0, 3).join(' ') || 'Header needs a Task-number column and a Descriptions column.'}`);
+        say(`Import found no tasks. ${res2.skipped.slice(0, 3).join(' ') || 'Header needs a Task-number column and a Descriptions column.'}`, 'err');
         return;
       }
       setRoots(res2.roots);
       setPlanRowId(null);
-      setPlanName(`Imported: ${file.name}`);
+      pendingCreate.current = true;
+      setApprovedBy(null);
+      setPlanName(`Imported: ${file.name}${sheetLabel ? ` · ${sheetLabel}` : ''}`);
       setSel(0);
       setView('l1');
-      const warns = res2.skipped.length ? ` ${res2.skipped.length} row${res2.skipped.length > 1 ? 's' : ''} had issues.` : '';
-      setMsg(`Imported ${res2.phases} phase${res2.phases !== 1 ? 's' : ''} and ${res2.tasks} task${res2.tasks !== 1 ? 's' : ''} from ${file.name}.${warns}`);
+      // Auto-fit the zoom: pick the widest preset that keeps the whole plan
+      // (long staggered imports, 360 days) on screen next to the task table.
+      let planDays = 0;
+      const fit = (ts: PTask[]): void => {
+        for (const t of ts) {
+          planDays = Math.max(planDays, (t.off ?? 0) + t.dur);
+          fit(t.kids);
+        }
+      };
+      fit(res2.roots);
+      const avail = Math.max(480, window.innerWidth - GANTT_TABLE_W - 120);
+      const preset = [26, 12, 5, 2].find((z) => planDays * z <= avail);
+      setDw(preset ?? 2);
+      const rows = res2.phases + res2.tasks;
+      const detail =
+        res2.phases && res2.tasks ? ` (${res2.phases} phase row${res2.phases === 1 ? '' : 's'} + ${res2.tasks} task row${res2.tasks === 1 ? '' : 's'})` : '';
+      const warns = res2.skipped.length ? ` · ${res2.skipped.length} row${res2.skipped.length > 1 ? 's' : ''} with a note: ${res2.skipped.slice(0, 3).join(' · ')}` : '';
+      say(`Imported ${rows} row${rows === 1 ? '' : 's'} into the schedule from ${file.name}${detail}.${warns}`, warns ? 'warn' : 'ok');
       setSaveState('idle');
       bump();
     } catch (err) {
-      setMsg(`Import failed: ${err instanceof XlsxParseError ? err.message : err instanceof Error ? err.message : 'unknown error'}. For .xlsx re-save as Microsoft Excel (.xlsx); legacy .xls is not supported.`);
+      say(`Import failed: ${err instanceof XlsxParseError ? err.message : err instanceof Error ? err.message : 'unknown error'}. For .xlsx re-save as Microsoft Excel (.xlsx); legacy .xls is not supported.`, 'err');
     }
   };
 
   // ── auto-save: every edit lands in the register after a short debounce ─
   useEffect(() => {
     const t = setTimeout(() => {
-      if (readyRef.current && planRowId !== null && projectId) void doSave(true);
+      // A fresh import has no record row yet — create one so the plan
+      // survives a reload instead of vanishing back to blank.
+      if (readyRef.current && projectId && (planRowId !== null || pendingCreate.current)) void doSave(true);
     }, 1200);
     return () => clearTimeout(t);
-  }, [doSave, rev, planRowId]);
+  }, [doSave, rev, planRowId, projectId]);
+
+  // If the user switches project before an import's auto-save created its
+  // row, drop the flag: the old plan has no row to update, and the new
+  // project's saved plan takes over.
+  useEffect(() => {
+    pendingCreate.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   // ── table edits ────────────────────────────────────────────────────────
+
+  /** The lock notice shown when a plan-field edit is attempted on an approved baseline. */
+  const planLocked = (): string =>
+    'Baseline is approved — plan fields are frozen. Ask the approver to reopen it first.';
 
   const upName = (t: PTask, v: string): void => {
     const name = v.trim();
     if (!name) return;
+    if (frozen) return; // the inputs render disabled; this is the backstop
     t.name = name;
     setSaveState('idle');
     bump();
@@ -325,13 +409,31 @@ export default function ProjectPlannerPage(): React.JSX.Element {
 
   const upNum = (t: PTask, key: 'dur' | 'pct', v: number): void => {
     if (t.kids.length) return;
+    if (key === 'dur' && frozen) {
+      say(planLocked() ?? null, 'warn');
+      return;
+    }
     t[key] = key === 'dur' ? Math.max(1, Math.round(v) || 1) : Math.min(100, Math.max(0, Math.round(v) || 0));
+    setSaveState('idle');
+    bump();
+  };
+
+  /**
+   * Actual start / actual finish — the client spec keeps these editable even
+   * after the baseline is approved; only the plan fields freeze.
+   */
+  const upAct = (t: PTask, key: 'as' | 'ae', v: string): void => {
+    t[key] = v;
     setSaveState('idle');
     bump();
   };
 
   const upPred = (t: PTask, wbsText: string): void => {
     if (!res) return;
+    if (frozen) {
+      say(planLocked(), 'warn');
+      return;
+    }
     const byWbs = new Map<string, PTask>();
     for (const x of res.all) if (x.wbs) byWbs.set(x.wbs, x);
     const want = [...new Set(wbsText.split(/[ ,;]+/).map((s) => s.trim()).filter(Boolean))];
@@ -373,7 +475,19 @@ export default function ProjectPlannerPage(): React.JSX.Element {
     upPred(t, cleaned);
   };
 
+  /** Delay (client spec): actual finish − plan finish, in days. +1 day = one day late. */
+  const delayOf = (t: PTask, planFinish: Date): number | null => {
+    if (!t.ae) return null;
+    const a = new Date(`${t.ae}T00:00:00`);
+    if (Number.isNaN(a.getTime())) return null;
+    return Math.round((a.getTime() - planFinish.getTime()) / 86_400_000);
+  };
+
   const addSub = (t: PTask): void => {
+    if (frozen) {
+      say(planLocked(), 'warn');
+      return;
+    }
     const idx = t.kids.length + 1;
     const child = newTask(`Task ${wbsOf(t)}.${idx}`, 5, 0);
     t.kids.push(child);
@@ -384,6 +498,10 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   };
 
   const addPhase = (): void => {
+    if (frozen) {
+      say(planLocked(), 'warn');
+      return;
+    }
     const num = roots.length + 1;
     const p = newTask(`Phase ${num}`, 1, 0);
     p.kids.push(newTask(`Task ${num}.1`, 5, 0));
@@ -394,16 +512,16 @@ export default function ProjectPlannerPage(): React.JSX.Element {
     // New rows land at the bottom — jump there in both panes or the change
     // looks like the button did nothing.
     requestAnimationFrame(() => {
-      if (view === 'l1') {
-        if (l1Ref.current) l1Ref.current.scrollTop = l1Ref.current.scrollHeight;
-      } else {
-        if (leftRef.current) leftRef.current.scrollTop = leftRef.current.scrollHeight;
-        if (rightRef.current) rightRef.current.scrollTop = rightRef.current.scrollHeight;
-      }
+      const pane = view === 'l1' ? l1Ref.current : unifiedRef.current;
+      if (pane) pane.scrollTop = pane.scrollHeight;
     });
   };
 
   const del = (t: PTask): void => {
+    if (frozen) {
+      say(planLocked(), 'warn');
+      return;
+    }
     const leafCount = (function count(list: PTask[]): number {
       return list.reduce((a, x) => a + 1 + count(x.kids), 0);
     })([t]);
@@ -427,6 +545,22 @@ export default function ProjectPlannerPage(): React.JSX.Element {
     };
     strip(roots);
     if (sel && ids.has(sel)) setSel(0);
+    setSaveState('idle');
+    bump();
+  };
+
+  /** Reorder a task within its siblings (L2 inside its L1 phase; L1 among phases). WBS renumbers from the new order on the next compute; autosave persists it. */
+  const move = (t: PTask, dir: -1 | 1): void => {
+    if (frozen) {
+      say(planLocked(), 'warn');
+      return;
+    }
+    const list = t.parent ? t.parent.kids : roots;
+    const i = list.findIndex((x) => x.id === t.id);
+    const j = i + dir;
+    if (i === -1 || j < 0 || j >= list.length) return;
+    const [x] = list.splice(i, 1);
+    list.splice(j, 0, x);
     setSaveState('idle');
     bump();
   };
@@ -461,12 +595,6 @@ export default function ProjectPlannerPage(): React.JSX.Element {
     bump();
   };
 
-  /** Status ⇄ progress: Completed = 100, In Progress = 50, Pending = 0. */
-  const statusOf = (pct: number): string => (pct >= 100 ? 'Completed' : pct > 0 ? 'In Progress' : 'Pending');
-  const setStatus = (t: PTask, v: string): void => {
-    upNum(t, 'pct', v === 'Completed' ? 100 : v === 'In Progress' ? 50 : 0);
-  };
-
   const pick = (id: number): void => setSel(sel === id ? 0 : id);
   const toggle = (t: PTask): void => {
     t.open = !t.open;
@@ -487,6 +615,8 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   // ── Gantt geometry (faithful to the demo) ──────────────────────────────
 
   const ROW = 34;
+  /** Width of the sticky task table in the unified Gantt (bars start after it). */
+  const GANTT_TABLE_W = 640;
   const DAY = 86_400_000;
   const visible = res?.visible ?? [];
   const end = res?.end ?? 1;
@@ -647,11 +777,19 @@ export default function ProjectPlannerPage(): React.JSX.Element {
             <>
               <label>
                 Zoom{' '}
-                <select value={dw} onChange={(e) => setDw(Number(e.target.value))}>
+                <select value={String(dw)} onChange={(e) => setDw(Number(e.target.value))}>
                   <option value="26">Days</option>
                   <option value="12">Weeks</option>
                   <option value="5">Months</option>
+                  <option value="2">Overview</option>
                 </select>
+                <button type="button" onClick={() => {
+                  let d = 0;
+                  const w = (ts: PTask[]): void => { for (const t of ts) { d = Math.max(d, (t.off ?? 0) + t.dur); w(t.kids); } };
+                  w(roots);
+                  const avail = Math.max(480, window.innerWidth - GANTT_TABLE_W - 120);
+                  setDw([26, 12, 5, 2].find((z) => d * z <= avail) ?? 2);
+                }}>Fit</button>
               </label>
               <label>
                 <input type="checkbox" checked={criticalOn} onChange={(e) => setCriticalOn(e.target.checked)} /> Critical path
@@ -675,12 +813,22 @@ export default function ProjectPlannerPage(): React.JSX.Element {
             }}
           />
           <button type="button" className={view === 'l1' ? 'v on' : 'v'} onClick={() => setView('l1')}>
-            L1 table
+            Schedule
           </button>
           <button type="button" className={view === 'gantt' ? 'v on' : 'v'} onClick={() => setView('gantt')}>
             Gantt
           </button>
-          <button type="button" onClick={loadSampleData}>Load sample</button>
+          {canApprove ? (
+            frozen ? (
+              <button type="button" className="p" onClick={reopenBaseline} title="Un-freeze the plan fields">
+                Reopen baseline
+              </button>
+            ) : (
+              <button type="button" className="p" onClick={approveBaseline} title="Freeze the plan fields; actuals stay live">
+                Approve baseline
+              </button>
+            )
+          ) : null}
           {view === 'gantt' ? (
             <>
               <button type="button" onClick={() => setAllOpen(true)}>Expand all</button>
@@ -691,8 +839,32 @@ export default function ProjectPlannerPage(): React.JSX.Element {
       </div>
 
       {msg ? (
-        <div className="planner-notice">
+        <div className={`planner-notice planner-notice-${msgTone}`}>
           {msg}
+        </div>
+      ) : null}
+
+      {sheetPick ? (
+        <div className="planner-notice planner-notice-info">
+          <b>{sheetPick.file.name}</b> has {sheetPick.sheets.length} tabs — pick which one to import:
+          <div className="sheet-pick">
+            {sheetPick.sheets.map((s) => (
+              <button
+                key={s.name}
+                type="button"
+                className="p"
+                onClick={() => {
+                  const f = sheetPick.file;
+                  void finishImport(f, s.grid, s.name);
+                }}
+              >
+                {s.name}
+              </button>
+            ))}
+            <button type="button" onClick={() => setSheetPick(null)}>
+              Cancel
+            </button>
+          </div>
         </div>
       ) : null}
 
@@ -709,129 +881,177 @@ export default function ProjectPlannerPage(): React.JSX.Element {
       ) : null}
 
       <div className="planner-wrap">
-        <div
-          className={`planner-left${view === 'l1' ? ' l1-off' : ''}`}
-          ref={leftRef}
-          onScroll={() => {
-            if (rightRef.current && leftRef.current) rightRef.current.scrollTop = leftRef.current.scrollTop;
-          }}
-        >
-          <table>
-            <thead>
-              <tr>
-                <th style={{ width: 56 }}>WBS</th>
-                <th>Task name</th>
-                <th style={{ width: 48 }}>Days</th>
-                <th style={{ width: 96 }}>Depends on</th>
-                <th style={{ width: 78 }}>Start</th>
-                <th style={{ width: 78 }}>Finish</th>
-                <th style={{ width: 54 }}>% done</th>
-                <th style={{ width: 44 }} />
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((t) => {
-                if (!res) return null;
-                const c = res.c.get(t.id)!;
-                const s = t.kids.length > 0;
-                const critRow = criticalOn && !s && c.crit;
-                return (
-                  <tr key={t.id} className={`${s ? 'sum' : 'leaf'} ${critRow ? 'crit' : ''} ${sel === t.id ? 'selrow' : ''}`}>
-                    <td className="c" onClick={() => pick(t.id)}>
-                      <span className={`dot ${st(c.pct)}`} />
-                      {c.wbs}
-                    </td>
-                    <td>
-                      <div className="nm" style={{ paddingLeft: c.depth * 18 }}>
-                        {s ? (
-                          <button type="button" className="tg" onClick={() => toggle(t)}>
-                            {t.open ? '▾' : '▸'}
-                          </button>
-                        ) : (
-                          <span className="tg" />
-                        )}
-                        <input
-                          key={`n${t.id}:${t.name}`}
-                          defaultValue={t.name}
-                          autoFocus={focusId === t.id}
-                          onBlur={(e) => {
-                            if (focusId === t.id) setFocusId(0);
-                            upName(t, e.target.value);
-                          }}
-                        />
-                      </div>
-                    </td>
-                    <td className="c">
-                      {s ? c.dur : (
-                        <input
-                          key={`d${t.id}:${t.dur}`}
-                          type="number"
-                          min={1}
-                          defaultValue={t.dur}
-                          onBlur={(e) => upNum(t, 'dur', Number(e.target.value) || 1)}
-                        />
-                      )}
-                    </td>
-                    <td>
-                      <input
-                        key={`p${t.id}:${t.pred.join(',')}`}
-                        placeholder="—"
-                        defaultValue={t.pred
-                          .map((id) => res.taskById.get(id)?.wbs ?? '')
-                          .filter(Boolean)
-                          .join(', ')}
-                        onBlur={(e) => upPred(t, e.target.value)}
-                      />
-                    </td>
-                    <td className="c">{fmt(c.start)}</td>
-                    <td className="c">{fmt(c.finish)}</td>
-                    <td className="c">
-                      {s ? c.pct : (
-                        <input
-                          key={`x${t.id}:${t.pct}`}
-                          type="number"
-                          min={0}
-                          max={100}
-                          defaultValue={t.pct}
-                          onBlur={(e) => upNum(t, 'pct', Number(e.target.value) || 0)}
-                        />
-                      )}
-                    </td>
-                    <td className="c">
-                      <button type="button" className="ic a" title="Add subtask" onClick={() => addSub(t)}>
-                        +
-                      </button>
-                      <button type="button" className="ic d" title="Delete (with subtasks)" onClick={() => del(t)}>
-                        ✕
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        {view === 'gantt' ? (
+          <div className="gantt" ref={unifiedRef}>
+            <div className="gantt-inner" style={{ width: GANTT_TABLE_W + W, height: 44 + visible.length * ROW }}>
+              {/* Left: the task table. Sticky so the bars stay glued to their rows. */}
+              <div className="gantt-table" style={{ width: GANTT_TABLE_W }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 56 }}>WBS</th>
+                      <th>Task name</th>
+                      <th style={{ width: 48 }}>Days</th>
+                      <th style={{ width: 96 }}>Depends on</th>
+                      <th style={{ width: 78 }}>Start</th>
+                      <th style={{ width: 78 }}>Finish</th>
+                      <th style={{ width: 54 }}>% done</th>
+                      <th style={{ width: 44 }} />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map((t) => {
+                      if (!res) return null;
+                      const c = res.c.get(t.id)!;
+                      const s = t.kids.length > 0;
+                      const critRow = criticalOn && !s && c.crit;
+                      return (
+                        <tr key={t.id} className={`${s ? 'sum' : 'leaf'} ${critRow ? 'crit' : ''} ${sel === t.id ? 'selrow' : ''}`}>
+                          <td className="c" onClick={() => pick(t.id)}>
+                            <span className={`dot ${st(c.pct)}`} />
+                            {c.wbs}
+                          </td>
+                          <td>
+                            <div className="nm" style={{ paddingLeft: c.depth * 18 }}>
+                              {s ? (
+                                <button type="button" className="tg" onClick={() => toggle(t)}>
+                                  {t.open ? '▾' : '▸'}
+                                </button>
+                              ) : (
+                                <span className="tg" />
+                              )}
+                              <input
+                                key={`n${t.id}:${t.name}`}
+                                defaultValue={t.name}
+                                autoFocus={focusId === t.id}
+                                disabled={frozen}
+                                onBlur={(e) => {
+                                  if (focusId === t.id) setFocusId(0);
+                                  upName(t, e.target.value);
+                                }}
+                              />
+                            </div>
+                          </td>
+                          <td className="c">
+                            {s ? c.dur : (
+                              <input
+                                key={`d${t.id}:${t.dur}`}
+                                type="number"
+                                min={1}
+                                defaultValue={t.dur}
+                                disabled={frozen}
+                                onBlur={(e) => upNum(t, 'dur', Number(e.target.value) || 1)}
+                              />
+                            )}
+                          </td>
+                          <td>
+                            <input
+                              key={`p${t.id}:${t.pred.join(',')}`}
+                              placeholder="—"
+                              defaultValue={t.pred
+                                .map((id) => res.taskById.get(id)?.wbs ?? '')
+                                .filter(Boolean)
+                                .join(', ')}
+                              disabled={frozen}
+                              onBlur={(e) => upPred(t, e.target.value)}
+                            />
+                          </td>
+                          <td className="c">{fmt(c.start)}</td>
+                          <td className="c">{fmt(c.finish)}</td>
+                          <td className="c">
+                            {s ? c.pct : (
+                              <input
+                                key={`x${t.id}:${t.pct}`}
+                                type="number"
+                                min={0}
+                                max={100}
+                                defaultValue={t.pct}
+                                onBlur={(e) => upNum(t, 'pct', Number(e.target.value) || 0)}
+                              />
+                            )}
+                          </td>
+                          <td className="c g-act">
+                            {!frozen && ((t.parent?.kids.length ?? roots.length) > 1 ? (
+                              <>
+                                <button type="button" className="ic" title="Move up (WBS renumbers)" onClick={() => move(t, -1)}>▲</button>
+                                <button type="button" className="ic" title="Move down (WBS renumbers)" onClick={() => move(t, 1)}>▼</button>
+                              </>
+                            ) : null)}
+                            {!s && !frozen ? (
+                              <button type="button" className="ic a" title="Add subtask" onClick={() => addSub(t)}>
+                                +
+                              </button>
+                            ) : null}
+                            {!frozen ? (
+                              <button type="button" className="ic d" title="Delete (with subtasks)" onClick={() => del(t)}>
+                                ✕
+                              </button>
+                            ) : null}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {/* Right: the timeline, glued to the same row grid. */}
+              <div className="gantt-chart" style={{ left: GANTT_TABLE_W, width: W }}>
+                <div className="gantt-time-hd" style={{ width: W }}>
+                  {headEls}
+                </div>
+                <div className="gantt-chart-body" style={{ width: W, height: visible.length * ROW }}>
+                  {weekEls}
+                  {gridEls}
+                  {rowStripe}
+                  {bars}
+                  {labels}
+                  {tx >= 0 && tx <= W ? <div className="planner-today" style={{ left: tx }} /> : null}
+                  <svg style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }} width={W} height={Math.max(visible.length * ROW, 44)}>
+                    <defs>
+                      <marker id="planner-a" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                        <path d="M0 0L7 3.5L0 7z" fill="#475569" />
+                      </marker>
+                    </defs>
+                    {arrows}
+                  </svg>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {view === 'l1' ? (
           <div className="l1-view" ref={l1Ref}>
             {stats ? (
               <div className="l1-title">
                 <b>{allProjects.find((p) => p.id === projectId)?.name ?? planName}</b>
-                <span>Level-1, Overall Project Schedule · {fmt(stats.start)} → {fmt(stats.finish)} · {stats.duration} days</span>
+                <span>
+                  Overall Project Schedule · {fmt(stats.start)} → {fmt(stats.finish)} · {stats.duration} days
+                  {frozen ? (
+                    <em className="l1-locked">Approved · {approvedBy}</em>
+                  ) : canApprove ? (
+                    <em className="l1-draft">Draft — approvable</em>
+                  ) : (
+                    <em className="l1-draft">Draft — editable</em>
+                  )}
+                </span>
               </div>
             ) : null}
             <table className="l1">
               <thead>
                 <tr>
-                  <th style={{ width: 64 }}>Task</th>
-                  <th>Descriptions</th>
-                  <th style={{ width: 82 }}>Duration (days)</th>
-                  <th style={{ width: 118 }}>Dependencies</th>
-                  <th style={{ width: 64 }}>Float / Slack</th>
-                  <th style={{ width: 78 }}>Start</th>
-                  <th style={{ width: 78 }}>End</th>
-                  <th style={{ width: 88 }}>Status</th>
-                  <th style={{ width: 140 }}>Remarks</th>
+                  <th style={{ width: 64 }}>Task no.</th>
+                  <th>Task description</th>
+                  <th style={{ width: 74 }}>Duration</th>
+                  <th style={{ width: 104 }}>Depends on</th>
+                  <th style={{ width: 48 }}>Float / Slack</th>
+                  <th style={{ width: 74 }}>Plan start</th>
+                  <th style={{ width: 74 }}>Plan end</th>
+                  <th style={{ width: 108 }}>Actual start</th>
+                  <th style={{ width: 108 }}>Actual finish</th>
+                  <th style={{ width: 64 }}>% complete</th>
+                  <th style={{ width: 58 }}>Delay</th>
+                  <th style={{ width: 120 }}>Remarks</th>
                   <th style={{ width: 40 }} />
                 </tr>
               </thead>
@@ -840,7 +1060,10 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                   if (!res) return null;
                   const c = res.c.get(t.id)!;
                   const s = t.kids.length > 0;
-                  const slack = Math.max(0, c.lf - c.es - c.dur + 1);
+                  // Free float in days, matching the engine's critical test
+                  // (lf - es - dur <= 0): critical tasks must show 0, not 1.
+                  const slack = Math.max(0, c.lf - c.es - c.dur);
+                  const delay = s ? null : delayOf(t, c.finish);
                   return (
                     <tr key={t.id} className={s ? 'l1-phase' : 'l1-task'}>
                       <td className="l1-num" onClick={() => pick(t.id)}>
@@ -858,6 +1081,7 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                           key={`L1n${t.id}:${t.name}`}
                           defaultValue={t.name}
                           autoFocus={focusId === t.id}
+                          disabled={frozen}
                           onBlur={(e) => {
                             if (focusId === t.id) setFocusId(0);
                             upName(t, e.target.value);
@@ -873,6 +1097,7 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                             type="number"
                             min={1}
                             defaultValue={t.dur}
+                            disabled={frozen}
                             onBlur={(e) => upNum(t, 'dur', Number(e.target.value) || 1)}
                           />
                         )}
@@ -882,24 +1107,43 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                           key={`L1p${t.id}:${t.pred.join(',')}`}
                           placeholder="—"
                           defaultValue={depText(t)}
+                          disabled={frozen}
                           onBlur={(e) => upDepL1(t, e.target.value)}
                         />
                       </td>
-                      <td className="l1-c">{s ? c.dur > 1 ? slack : '—' : slack}</td>
+                      <td className="l1-c" title="Days of free float: the task can slip this much without moving the project finish">{s ? c.dur > 1 ? slack : '—' : slack}</td>
                       <td className="l1-c">{fmt(c.start)}</td>
                       <td className="l1-c">{fmt(c.finish)}</td>
                       <td className="l1-c">
-                        {s ? c.pct + '% done' : (
-                          <select
-                            key={`L1s${t.id}:${t.pct}`}
-                            value={statusOf(t.pct)}
-                            onChange={(e) => setStatus(t, e.target.value)}
-                          >
-                            <option>Pending</option>
-                            <option>In Progress</option>
-                            <option>Completed</option>
-                          </select>
+                        <input
+                          key={`L1as${t.id}:${t.as ?? ''}`}
+                          type="date"
+                          value={t.as ?? ''}
+                          onChange={(e) => upAct(t, 'as', e.target.value)}
+                        />
+                      </td>
+                      <td className="l1-c">
+                        <input
+                          key={`L1ae${t.id}:${t.ae ?? ''}`}
+                          type="date"
+                          value={t.ae ?? ''}
+                          onChange={(e) => upAct(t, 'ae', e.target.value)}
+                        />
+                      </td>
+                      <td className="l1-c">
+                        {s ? c.pct + '%' : (
+                          <input
+                            key={`L1pc${t.id}:${t.pct}`}
+                            type="number"
+                            min={0}
+                            max={100}
+                            defaultValue={t.pct}
+                            onBlur={(e) => upNum(t, 'pct', Number(e.target.value) || 0)}
+                          />
                         )}
+                      </td>
+                      <td className={`l1-c l1-delay${delay !== null && delay > 0 ? ' late' : delay !== null && delay < 0 ? ' early' : ''}`} title={delay !== null ? `Actual finish ${delay >= 0 ? '+' : ''}${delay} days vs plan finish` : 'Set the actual finish to calculate delay'}>
+                        {s ? '—' : delay === null ? '—' : `${delay >= 0 ? '+' : ''}${delay} day${Math.abs(delay) === 1 ? '' : 's'}`}
                       </td>
                       <td>
                         <input
@@ -909,15 +1153,23 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                           onBlur={(e) => upRem(t, e.target.value)}
                         />
                       </td>
-                      <td className="l1-c">
-                        {!s ? (
+                      <td className="l1-c l1-act">
+                        {!frozen && ((t.parent?.kids.length ?? roots.length) > 1 ? (
+                          <>
+                            <button type="button" className="ic" title="Move up (WBS renumbers)" onClick={() => move(t, -1)}>▲</button>
+                            <button type="button" className="ic" title="Move down (WBS renumbers)" onClick={() => move(t, 1)}>▼</button>
+                          </>
+                        ) : null)}
+                        {!s && !frozen ? (
                           <button type="button" className="ic a" title="Add subtask" onClick={() => addSub(t)}>
                             +
                           </button>
                         ) : null}
-                        <button type="button" className="ic d" title="Delete (with subtasks)" onClick={() => del(t)}>
-                          ✕
-                        </button>
+                        {!frozen ? (
+                          <button type="button" className="ic d" title="Delete (with subtasks)" onClick={() => del(t)}>
+                            ✕
+                          </button>
+                        ) : null}
                       </td>
                     </tr>
                   );
@@ -927,33 +1179,6 @@ export default function ProjectPlannerPage(): React.JSX.Element {
           </div>
         ) : null}
 
-        <div
-          className={`planner-right${view === 'l1' ? ' l1-off' : ''}`}
-          ref={rightRef}
-          onScroll={() => {
-            if (leftRef.current && rightRef.current) leftRef.current.scrollTop = rightRef.current.scrollTop;
-          }}
-        >
-          <div className="planner-hd" style={{ width: W }}>
-            {headEls}
-          </div>
-          <div style={{ position: 'relative', width: W, height: visible.length * ROW }}>
-            {weekEls}
-            {gridEls}
-            {rowStripe}
-            {bars}
-            {labels}
-            {tx >= 0 && tx <= W ? <div className="planner-today" style={{ left: tx }} /> : null}
-            <svg style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }} width={W} height={Math.max(visible.length * ROW, 44)}>
-              <defs>
-                <marker id="planner-a" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-                  <path d="M0 0L7 3.5L0 7z" fill="#475569" />
-                </marker>
-              </defs>
-              {arrows}
-            </svg>
-          </div>
-        </div>
       </div>
 
       <div className="planner-tip">
@@ -1007,21 +1232,37 @@ const PLANNER_CSS = `
 .planner-root .planner-toolbar label{flex:none}
 .planner-root .planner-toolbar button{flex:none;white-space:nowrap}
 .planner-root .planner-save{font-size:11.5px;color:#cfe8dc;background:rgba(255,255,255,.12);padding:3px 8px;border-radius:10px;margin-left:2px}
-.planner-root .planner-notice{margin:8px 0;padding:8px 12px;border-radius:6px;background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;font-size:12.5px}
+.planner-root .planner-notice{margin:8px 0;padding:8px 12px;border-radius:6px;font-size:12.5px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}
+.planner-root .planner-notice-ok{background:#ecfdf5;color:#047857;border-color:#a7f3d0}
+.planner-root .planner-notice-warn{background:#fffbeb;color:#b45309;border-color:#fde68a}
+.planner-root .planner-notice-err{background:#fef2f2;color:#b91c1c;border-color:#fecaca}
+.planner-root .sheet-pick{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.planner-root .sheet-pick button{padding:4px 14px;border-radius:6px;font-size:12.5px;cursor:pointer;background:#1d4ed8;color:#fff;border:1px solid #1d4ed8}
+.planner-root .sheet-pick button:hover{background:#1e40af}
+.planner-root .sheet-pick button:last-child{background:#fff;color:#64748b;border-color:#cbd5e1}
+.planner-root .sheet-pick button:last-child:hover{background:#f8fafc}
 .planner-root .planner-wrap{display:flex;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.12);overflow:hidden;height:calc(100vh - 360px);min-height:380px}
-.planner-root .planner-left{flex:none;width:610px;overflow:auto;border-right:2px solid #cbd5e1}
-.planner-root .planner-right{flex:1;overflow:auto;position:relative}
-.planner-root .planner-left table{border-collapse:collapse;width:100%;font-size:13px;color:#1e293b}
-.planner-root .planner-left th{position:sticky;top:0;background:#e2e8f0;height:44px;text-align:left;padding:0 5px;z-index:2;font-size:12px;font-weight:600}
-.planner-root .planner-left td{height:34px;padding:0 4px;border-bottom:1px solid #e5e7eb;white-space:nowrap}
-.planner-root .planner-left td input{width:100%;border:1px solid transparent;background:transparent;padding:3px 4px;font-size:13px;color:#1e293b}
-.planner-root .planner-left td input:hover,.planner-root .planner-left td input:focus{border-color:#94a3b8;background:#fff;outline:none}
-.planner-root .planner-left td.c{text-align:center;color:#475569}
-.planner-root .planner-left td.c input{text-align:center;width:48px}
-.planner-root .planner-left tbody tr:hover td{background:#f0f9ff}
-.planner-root .planner-left tr.selrow td{background:#dbeafe!important}
-.planner-root .planner-left tr.sum td{background:#f1f5f9;font-weight:700}
-.planner-root .planner-left tr.crit.leaf td:nth-child(2) input{color:#b91c1c;font-weight:600}
+/* Unified Gantt: one scroll container, the task table sticky-left, the
+   timeline glued to its right edge. No more two side-by-side panes. */
+.planner-root .gantt{flex:1;overflow:auto;background:#fff;position:relative}
+.planner-root .gantt-inner{position:relative}
+.planner-root .gantt-table{position:sticky;left:0;z-index:4;background:#fff;border-right:2px solid #cbd5e1;box-shadow:2px 0 6px rgba(15,23,42,.12)}
+.planner-root .gantt-table table{border-collapse:collapse;width:100%;font-size:13px;color:#1e293b}
+.planner-root .gantt-table thead th{position:sticky;top:0;background:#e2e8f0;height:44px;text-align:left;padding:0 5px;z-index:2;font-size:12px;font-weight:600;color:#475569}
+.planner-root .gantt-table td{height:34px;padding:0 4px;border-bottom:1px solid #e5e7eb;white-space:nowrap}
+.planner-root .gantt-table td input{width:100%;border:1px solid transparent;background:transparent;padding:3px 4px;font-size:13px;color:#1e293b}
+.planner-root .gantt-table td input:hover,.planner-root .gantt-table td input:focus{border-color:#94a3b8;background:#fff;outline:none}
+.planner-root .gantt-table td.c{text-align:center;color:#475569}
+.planner-root .gantt-table td.c input{text-align:center;width:48px}
+.planner-root .gantt-table tbody tr:hover td{background:#f0f9ff}
+.planner-root .gantt-table tr.selrow td{background:#dbeafe!important}
+.planner-root .gantt-table tr.sum td{background:#f1f5f9;font-weight:700}
+.planner-root .gantt-table tr.crit.leaf td:nth-child(2) input{color:#b91c1c;font-weight:600}
+.planner-root .gantt-table input:disabled,.planner-root .l1 input:disabled{background:#f1f5f9;color:#64748b;cursor:not-allowed;border-color:transparent}
+.planner-root .gantt-chart{position:absolute;top:0}
+.planner-root .gantt-time-hd{position:sticky;top:0;height:44px;background:#e2e8f0;z-index:3;font-size:11px;color:#475569}
+.planner-root .gantt-time-hd div{position:absolute;top:0;height:44px;border-left:1px solid #cbd5e1;padding:3px;line-height:1.25;overflow:hidden}
+.planner-root .gantt-chart-body{position:relative}
 .planner-root .nm{display:flex;align-items:center}
 .planner-root .tg{width:18px;border:0;background:none;padding:0;color:#475569;font-size:13px;flex:none;cursor:pointer}
 .planner-root .ic{border:0;background:none;padding:0 4px;font-weight:700;font-size:13px;cursor:pointer}
@@ -1055,6 +1296,13 @@ const PLANNER_CSS = `
 .planner-root .l1-title{display:flex;justify-content:space-between;align-items:baseline;gap:10px;background:#c8a8d6;color:#1e1b4b;padding:7px 12px;font-size:13px;position:sticky;top:0;z-index:4}
 .planner-root .l1-title b{font-size:14px}
 .planner-root .l1-title span{font-size:11.5px;color:#3b2a63}
+.planner-root .l1-title em{font-style:normal;font-weight:700;font-size:11px;padding:2px 8px;border-radius:10px;margin-left:8px}
+.planner-root .l1-title em.l1-locked{background:#1e1b4b;color:#fde68a}
+.planner-root .l1-title em.l1-draft{background:#3b2a63;color:#e9d5ff}
+.planner-root .l1 td.l1-delay.late{color:#b91c1c;font-weight:700}
+.planner-root .l1 td.l1-delay.early{color:#16a34a;font-weight:700}
+.planner-root .l1 input[type=date]{width:100%;border:1px solid transparent;background:transparent;padding:2px 4px;font-size:12px;color:#1e293b}
+.planner-root .l1 input[type=date]:hover,.planner-root .l1 input[type=date]:focus{border-color:#94a3b8;background:#fff;outline:none}
 .planner-root .l1 table, .planner-root table.l1{border-collapse:collapse;width:100%;font-size:12.5px;color:#1e293b}
 .planner-root .l1 thead th{position:sticky;top:33px;background:#c9a9d8;color:#1e1b4b;text-align:left;padding:6px 6px;font-size:12px;font-weight:700;z-index:3;border-bottom:1px solid #b795c9}
 .planner-root .l1 td{padding:4px 6px;border-bottom:1px solid #dbe4f0;white-space:nowrap}

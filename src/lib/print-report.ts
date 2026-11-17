@@ -14,6 +14,8 @@ export interface ReportTable {
   title: string;
   head: string[];
   rows: string[][];
+  /** Per-column alignment, e.g. right-align the numeric tail. */
+  aligns?: Array<'left' | 'right'>;
 }
 
 export interface ReportSpec {
@@ -21,6 +23,10 @@ export interface ReportSpec {
   sub: string;
   meta: string[];
   tables: ReportTable[];
+  /** A one-paragraph note under the tables (e.g. PR remarks). */
+  notes?: string;
+  /** Signature blocks across the foot, e.g. ['Prepared by', 'Checked by', 'Approved by']. */
+  signatures?: string[];
 }
 
 /** Opens the report and triggers the print dialog once styles are ready. */
@@ -32,20 +38,36 @@ export function openPrintReport(spec: ReportSpec): void {
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   const tablesHtml = spec.tables
-    .map((t) => `
+    .map((t) => {
+      const align = (i: number): string =>
+        t.aligns && t.aligns[i] === 'right' ? 'text-align:right;' : '';
+      const head = t.head.map((h, i) => `<th style="${align(i)}">${esc(h)}</th>`).join('');
+      const body =
+        t.rows.length === 0
+          ? `<tr><td colspan="${t.head.length}" style="color:#666">No rows</td></tr>`
+          : t.rows
+              .map((r) => `<tr>${r.map((c, i) => `<td style="${align(i)}">${esc(c)}</td>`).join('')}</tr>`)
+              .join('');
+      return `
       <h2>${esc(t.title)}</h2>
       <table>
-        <thead>
-          <tr>${t.head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>
-        </thead>
-        <tbody>
-          ${t.rows.length === 0
-            ? `<tr><td colspan="${t.head.length}" style="color:#666">No rows</td></tr>`
-            : t.rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}
-        </tbody>
+        <thead><tr>${head}</tr></thead>
+        <tbody>${body}</tbody>
       </table>
-    `)
+    `;
+    })
     .join('');
+
+  // A totals / notes paragraph and a signature strip, both optional.
+  const notesHtml = spec.notes
+    ? `<p style="font-size:11px;margin:14px 0 0">${esc(spec.notes)}</p>`
+    : '';
+  const sigHtml = spec.signatures && spec.signatures.length
+    ? `<div style="display:flex;gap:24px;margin-top:44px;font-size:11px">
+         ${spec.signatures.map((s) =>
+           `<div style="flex:1;border-top:1px solid #444;padding-top:4px;text-align:center">${esc(s)}</div>`).join('')}
+       </div>`
+    : '';
 
   w.document.write(`<!doctype html>
 <html>
@@ -89,6 +111,8 @@ export function openPrintReport(spec: ReportSpec): void {
   </div>
   <p class="meta">${spec.meta.map((m) => `<span>${esc(m)}</span>`).join('')}</p>
   ${tablesHtml}
+  ${notesHtml}
+  ${sigHtml}
   <div class="foot">Generated ${new Date().toLocaleString('en-IN')} · KEC Agritech ERP · ${esc(spec.title)}</div>
 </body>
 </html>`);
