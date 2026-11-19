@@ -82,6 +82,26 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   const [sel, setSel] = useState(0);
   /** 'l1' = the client schedule-table format (Task / Descriptions / … / Remarks); 'gantt' = the chart view. */
   const [view, setView] = useState<'l1' | 'gantt'>('l1');
+  /** Full-screen Gantt: the chart normally sits in the fixed-height panel
+   * beside the L1 table, so a wide plan scrolls sideways. This lifts the
+   * whole chart (task table + timeline) into a viewport overlay — the plan
+   * gets the full window and the user scrolls a roomy canvas instead of a
+   * cramped strip. Escape or the floating button drops back to the panel. */
+  const [ganttFull, setGanttFull] = useState(false);
+  /** Chart-only mode: the sticky task table is hidden and the timeline
+   *  owns the full width — "show me just the graph", no side scroll. */
+  const [ganttChartOnly, setGanttChartOnly] = useState(false);
+  useEffect(() => {
+    if (!ganttFull && !ganttChartOnly) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        setGanttFull(false);
+        setGanttChartOnly(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [ganttFull, ganttChartOnly]);
   const [msg, setMsg] = useState<string | null>(null);
   const [msgTone, setMsgTone] = useState<'info' | 'ok' | 'warn' | 'err'>('info');
   const say = (m: string | null, tone: 'info' | 'ok' | 'warn' | 'err' = 'info') => { setMsg(m); setMsgTone(m ? tone : 'info'); };
@@ -769,6 +789,18 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   const days = end + 16;
   const W = days * dw;
 
+  /** Pick the zoom level that fits the whole plan into the chart's actual
+   *  container width — the panel strip in normal mode, the whole viewport
+   *  when the Gantt is lifted to full screen. Measuring the container beats
+   *  guessing the sidebar/padding widths from the window. */
+  const fitGantt = (availOverride?: number): void => {
+    let d = 0;
+    const w = (ts: PTask[]): void => { for (const t of ts) { d = Math.max(d, (t.off ?? 0) + t.dur); w(t.kids); } };
+    w(roots);
+    const avail = Math.max(480, availOverride ?? (unifiedRef.current?.clientWidth ?? window.innerWidth - GANTT_TABLE_W - 120));
+    setDw([26, 12, 5, 2].find((z) => d * z <= avail) ?? 2);
+  };
+
   const weekEls: React.ReactNode[] = [];
   const gridEls: React.ReactNode[] = [];
   const headEls: React.ReactNode[] = [];
@@ -799,12 +831,13 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   const bars: React.ReactNode[] = [];
   const labels: React.ReactNode[] = [];
   const arrows: React.ReactNode[] = [];
+  const ganttRows = shown;
   const ix: Record<number, number> = {};
-  visible.forEach((t, i) => {
+  ganttRows.forEach((t, i) => {
     ix[t.id] = i;
   });
 
-  visible.forEach((t, i) => {
+  ganttRows.forEach((t, i) => {
     if (!res) return;
     const c = res.c.get(t.id)!;
     const s = t.kids.length > 0;
@@ -831,7 +864,7 @@ export default function ProjectPlannerPage(): React.JSX.Element {
     );
     for (const pid of t.pred) {
       if (ix[pid] === undefined) continue;
-      const q = visible[ix[pid]];
+      const q = ganttRows[ix[pid]];
       const cq = res.c.get(pid)!;
       const x1 = (cq.es + cq.dur) * dw;
       const y1 = ix[pid] * ROW + 17;
@@ -928,13 +961,7 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                   <option value="5">Months</option>
                   <option value="2">Overview</option>
                 </select>
-                <button type="button" onClick={() => {
-                  let d = 0;
-                  const w = (ts: PTask[]): void => { for (const t of ts) { d = Math.max(d, (t.off ?? 0) + t.dur); w(t.kids); } };
-                  w(roots);
-                  const avail = Math.max(480, window.innerWidth - GANTT_TABLE_W - 120);
-                  setDw([26, 12, 5, 2].find((z) => d * z <= avail) ?? 2);
-                }}>Fit</button>
+                <button type="button" onClick={() => fitGantt()}>Fit</button>
               </label>
               <label>
                 <input type="checkbox" checked={criticalOn} onChange={(e) => setCriticalOn(e.target.checked)} /> Critical path
@@ -977,6 +1004,23 @@ export default function ProjectPlannerPage(): React.JSX.Element {
           <button type="button" className={view === 'gantt' ? 'v on' : 'v'} onClick={() => setView('gantt')}>
             Gantt
           </button>
+          {view === 'gantt' ? (
+            <button
+              type="button"
+              className="p"
+              onClick={() => {
+                const next = !ganttFull;
+                setGanttFull(next);
+                if (next) {
+                  setGanttChartOnly(false);
+                  fitGantt(window.innerWidth - GANTT_TABLE_W - 80);
+                }
+              }}
+              title={ganttFull ? 'Exit full screen (Esc)' : 'View the Gantt on the whole screen'}
+            >
+              {ganttFull ? 'Exit full screen' : 'Full screen'}
+            </button>
+          ) : null}
           {canApprove ? (
             frozen ? (
               <button type="button" className="p" onClick={reopenBaseline} title="Un-freeze the plan fields">
@@ -1083,8 +1127,45 @@ export default function ProjectPlannerPage(): React.JSX.Element {
             value={stats.critical}
             active={critOnly}
             onClick={() => {
-              setCritOnly((v) => !v);
-              setView('l1');
+              const next = !critOnly;
+              setCritOnly(next);
+              // ON: the Gantt shows the critical branch only (chart + data
+              // together); OFF: back to the full L1 schedule.
+              setView(next ? 'gantt' : 'l1');
+            }}
+          />
+          <Card
+            label="Chart only"
+            value={ganttChartOnly ? 'Exit' : '▦'}
+            active={ganttChartOnly}
+            onClick={() => {
+              setView('gantt');
+              const next = !ganttChartOnly;
+              setGanttChartOnly(next);
+              if (next) {
+                setGanttFull(false);
+                // The table is hidden, so the whole window is chart room.
+                fitGantt(window.innerWidth - 80);
+              }
+            }}
+          />
+          <Card
+            label="Full chart"
+            value={ganttFull ? 'Exit' : '⛶'}
+            active={ganttFull}
+            onClick={() => {
+              setView('gantt');
+              const next = !ganttFull;
+              setGanttFull(next);
+              if (next) {
+                // Full chart always keeps the task table visible; the
+                // chart-only mode (table hidden) is its opposite, so clear
+                // it — otherwise full screen opens without the table.
+                setGanttChartOnly(false);
+                // Entering from the stats row: fit the plan to the full
+                // window so the chart needs no side scroll on entry.
+                fitGantt(window.innerWidth - GANTT_TABLE_W - 80);
+              }
             }}
           />
         </div>
@@ -1092,10 +1173,22 @@ export default function ProjectPlannerPage(): React.JSX.Element {
 
       <div className="planner-wrap">
         {view === 'gantt' ? (
-          <div className="gantt" ref={unifiedRef}>
-            <div className="gantt-inner" style={{ width: GANTT_TABLE_W + W, height: 44 + visible.length * ROW }}>
-              {/* Left: the task table. Sticky so the bars stay glued to their rows. */}
-              <div className="gantt-table" style={{ width: GANTT_TABLE_W }}>
+          <div className={`gantt${ganttFull ? ' gantt-full' : ''}`} ref={unifiedRef}>
+            {ganttFull ? (
+              /* Title bar across the top of the overlay: the empty strip
+                 under the plan reads as padding, not a missing piece. */
+              <div className="gantt-full-hd">
+                <div className="gantt-full-hd-t">
+                  <b>{allProjects.find((pr) => pr.id === projectId)?.name ?? planName}</b>
+                  {stats ? <span>{fmt(stats.start)} → {fmt(stats.finish)} · {stats.duration} days · {Math.round(stats.progress)}% done</span> : null}
+                </div>
+                <button type="button" onClick={() => setGanttFull(false)} title="Exit full screen (Esc)">✕</button>
+              </div>
+            ) : null}
+            <div className="gantt-inner" style={{ width: (ganttChartOnly ? 0 : GANTT_TABLE_W) + W, height: 44 + ganttRows.length * ROW }}>
+              {/* Left: the task table. Sticky so the bars stay glued to their rows.
+                  Chart-only mode hides it entirely and lets the timeline own the width. */}
+              <div className="gantt-table" style={{ width: GANTT_TABLE_W, display: ganttChartOnly ? 'none' : undefined }}>
                 <table>
                   <thead>
                     <tr>
@@ -1110,7 +1203,7 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                     </tr>
                   </thead>
                   <tbody>
-                    {visible.map((t) => {
+                    {ganttRows.map((t) => {
                       if (!res) return null;
                       const c = res.c.get(t.id)!;
                       const s = t.kids.length > 0;
@@ -1205,18 +1298,18 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                 </table>
               </div>
               {/* Right: the timeline, glued to the same row grid. */}
-              <div className="gantt-chart" style={{ left: GANTT_TABLE_W, width: W }}>
+              <div className="gantt-chart" style={{ left: ganttChartOnly ? 0 : GANTT_TABLE_W, width: W }}>
                 <div className="gantt-time-hd" style={{ width: W }}>
                   {headEls}
                 </div>
-                <div className="gantt-chart-body" style={{ width: W, height: visible.length * ROW }}>
+                <div className="gantt-chart-body" style={{ width: W, height: ganttRows.length * ROW }}>
                   {weekEls}
                   {gridEls}
                   {rowStripe}
                   {bars}
                   {labels}
                   {tx >= 0 && tx <= W ? <div className="planner-today" style={{ left: tx }} /> : null}
-                  <svg style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }} width={W} height={Math.max(visible.length * ROW, 44)}>
+                  <svg style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }} width={W} height={Math.max(ganttRows.length * ROW, 44)}>
                     <defs>
                       <marker id="planner-a" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
                         <path d="M0 0L7 3.5L0 7z" fill="#475569" />
@@ -1487,6 +1580,18 @@ const PLANNER_CSS = `
 /* Unified Gantt: one scroll container, the task table sticky-left, the
    timeline glued to its right edge. No more two side-by-side panes. */
 .planner-root .gantt{flex:1;overflow:auto;background:#fff;position:relative}
+/* Full screen: the chart leaves the fixed-height panel and owns the whole
+   viewport — the sticky task table + timeline get the full window width,
+   so a wide plan fits without a cramped side scroll. */
+.planner-root .gantt.gantt-full{position:fixed;inset:0;z-index:80;width:100vw;height:100vh;flex:none}
+/* Full-screen title bar: fills the top of the overlay (no more empty strip
+   above the plan) and stays put when the chart scrolls. */
+.planner-root .gantt-full-hd{position:sticky;top:0;z-index:81;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:#f8fafc;border-bottom:1px solid #cbd5e1}
+.planner-root .gantt-full-hd-t{display:flex;align-items:baseline;gap:10px;min-width:0}
+.planner-root .gantt-full-hd-t b{font-size:15px;color:#1e293b}
+.planner-root .gantt-full-hd-t span{font-size:13px;color:#475569}
+.planner-root .gantt-full-hd button{border:1px solid var(--line,#cbd5e1);background:#fff;color:#1e293b;border-radius:6px;padding:5px 11px;font-size:13px;font-weight:600;cursor:pointer}
+.planner-root .gantt-full-hd button:hover{background:#e2e8f0}
 .planner-root .gantt-inner{position:relative}
 .planner-root .gantt-table{position:sticky;left:0;z-index:4;background:#fff;border-right:2px solid #cbd5e1;box-shadow:2px 0 6px rgba(15,23,42,.12)}
 .planner-root .gantt-table table{border-collapse:collapse;width:100%;font-size:13px;color:#1e293b}
