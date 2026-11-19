@@ -56,6 +56,8 @@ export type FieldType =
   | 'ref'
   | 'boolean'
   | 'file'
+  /** Several documents / images: an array of FileValue descriptors. */
+  | 'files'
   | 'table';
 
 /**
@@ -98,6 +100,21 @@ export interface RecordField {
    * key). GRN: selecting the PO reflects its item and quantity.
    */
   optionsFromDetail?: Record<string, string>;
+  /**
+   * Linked dropdown: narrow this select's live options to the source rows
+   * whose `matchField` equals the picked sibling field's (`fromField`) value,
+   * read through `sourceKey` (defaults to the sibling's own title value).
+   * The DSR sub-task list shows only the WBS tasks under the chosen main
+   * task.
+   */
+  optionsFromFilter?: { fromField: string; matchField: string; sourceKey?: string };
+  /**
+   * The options a status/select field shows on the ADD form when the client
+   * wants a single path in (the DSR add form offers only "Submit for
+   * approval"). The edit form and the register's chip keep the full
+   * `options` set; validation runs against `options`.
+   */
+  createOptions?: string[];
   refType: RefTarget | '';
   align: 'left' | 'right';
   listColumn: boolean;

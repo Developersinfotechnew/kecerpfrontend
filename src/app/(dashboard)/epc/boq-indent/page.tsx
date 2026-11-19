@@ -380,6 +380,8 @@ export default function EpcBoqIndentPage() {
               awaiting={awaiting}
               indentValue={indentValue}
               onGo={(t) => setTab(t)}
+              onNew={() => setDlg('new')}
+              mayNew={mayCreate}
             />
           ) : null}
 
@@ -429,6 +431,11 @@ export default function EpcBoqIndentPage() {
         <RecordForm
           type={boqType}
           record={boqForm === 'new' ? null : boqForm}
+          // Objection (fields to remove): Ordered qty / Vendor / PO reference
+          // belong to the RFQ and PO stages, not the indent-stage item form.
+          // Excluded here on this desk only; the generic BOQ screen keeps
+          // them, and editing never wipes a value a later stage wrote.
+          excludeFields={['orderedQty', 'vendor', 'poRef']}
           onCancel={() => setBoqForm(null)}
           onSubmit={async (body) => {
             if (boqForm === 'new') await records.create(BOQ_KEY, body);
@@ -482,6 +489,8 @@ function Overview({
   awaiting,
   indentValue,
   onGo,
+  onNew,
+  mayNew,
 }: {
   boq: RecordRow[];
   indents: RecordRow[];
@@ -491,6 +500,8 @@ function Overview({
   awaiting: number;
   indentValue: (p: RecordRow) => number;
   onGo: (t: 'boq' | 'pr') => void;
+  onNew: () => void;
+  mayNew: boolean;
 }) {
   // Items indented above their BOQ quantity — the desk's key red flag.
   const over = boq
@@ -524,7 +535,14 @@ function Overview({
       <Grid cols={2}>
         <Panel title="Recent indents">
           {indents.length === 0 ? (
-            <Empty text="No indents raised yet." action="New indent" onAction={() => onGo('pr')} />
+            // The overview shortcut must create, not merely move tabs: when
+            // the role may raise indents it opens the dialog here; a
+            // read-only role still lands on the PR tab.
+            <Empty
+              text="No indents raised yet."
+              action={mayNew ? 'New indent' : 'Open Indents / PR'}
+              onAction={() => (mayNew ? onNew() : onGo('pr'))}
+            />
           ) : (
             <div className="flex flex-col gap-0.5">
               {indents.slice(0, 5).map((p) => {
@@ -952,6 +970,9 @@ function IndentDialog({
       };
       if (existing) await records.update(IND_KEY, existing.id, body);
       else await records.create(IND_KEY, body);
+      // Objection 3 asked for a confirmation: the desk reloaded without
+      // saying what happened.
+      toast(existing ? `Indent ${existing.ref} updated.` : `Indent saved (${prNo.trim()}).`, 'ok');
       onSaved();
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Could not save the indent');
@@ -1034,14 +1055,14 @@ function IndentDialog({
             <table className="w-full border-collapse text-[12.5px]">
               <thead style={{ background: 'var(--panel-2)' }}>
                 <tr>
-                  {['Item no', 'Description', 'BOQ qty', 'Balance', 'Indent qty'].map((h, i) => (
+                  {['Item no', 'Description', 'BOQ qty', 'Balance', 'Rate', 'Indent qty', 'Amount'].map((h, i) => (
                     <th
                       key={i}
                       className="px-2 py-1 text-[11px] font-semibold"
                       style={{
                         border: '1px solid var(--line)',
                         color: 'var(--muted)',
-                        textAlign: i >= 2 && i <= 4 ? 'right' : 'left',
+                        textAlign: i >= 2 ? 'right' : 'left',
                         textTransform: 'uppercase',
                         letterSpacing: '.04em',
                       }}
@@ -1054,7 +1075,7 @@ function IndentDialog({
               <tbody>
                 {shown.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-3 py-6 text-center" style={{ color: 'var(--muted)' }}>
+                    <td colSpan={7} className="px-3 py-6 text-center" style={{ color: 'var(--muted)' }}>
                       {boq.length === 0 ? 'Add BOQ items first.' : 'No items match the filter.'}
                     </td>
                   </tr>
@@ -1073,6 +1094,9 @@ function IndentDialog({
                         <td className="num px-2 py-1.5 text-right" style={{ border: '1px solid var(--line)', color: bal < 0 ? 'var(--danger)' : undefined }} title="Balance">
                           {qtyf(bal)}
                         </td>
+                        <td className="num px-2 py-1.5 text-right" style={{ border: '1px solid var(--line)', color: rateOf(b.ref) > 0 ? undefined : 'var(--danger)' }} title={rateOf(b.ref) > 0 ? 'BOQ rate' : 'No BOQ rate set. The amount reads 0 until the BOQ rate is filled.'}>
+                          {rateOf(b.ref) > 0 ? `₹${inr(rateOf(b.ref))}` : 'no rate'}
+                        </td>
                         <td className="px-2 py-1.5" style={{ border: '1px solid var(--line)' }}>
                           <input
                             inputMode="decimal"
@@ -1085,6 +1109,11 @@ function IndentDialog({
                               color: over ? 'var(--danger)' : undefined,
                             }}
                           />
+                        </td>
+                        {/* Auto amount: indent qty times the BOQ rate. The live
+                            total above and the saved est value follow it. */}
+                        <td className="num px-2 py-1.5 text-right" style={{ border: '1px solid var(--line)' }}>
+                          {Number(v) > 0 ? inr(Number(v) * rateOf(b.ref)) : '—'}
                         </td>
                       </tr>
                     );

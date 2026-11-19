@@ -4,9 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { DataTable, Notice, Panel } from '@/components/ui';
 import { REPORT_LIMIT } from '@/lib/analytics';
-import { records } from '@/lib/services';
+import { projects, records, type ProjectOption } from '@/lib/services';
 import type { RecordRow } from '@/lib/types';
-import type { ReportDef } from '@/lib/report-definitions';
+import type { ReportDef, ReportContext } from '@/lib/report-definitions';
 
 /**
  * Runs one report definition against the live registers.
@@ -30,28 +30,56 @@ export function ReportRun({
   onBack: () => void;
 }) {
   const [data, setData] = useState<Record<string, RecordRow[]> | null>(null);
+  const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Other Requirements (client): the date-ranged reports run From / To.
+  const [rangeFrom, setRangeFrom] = useState('');
+  const [rangeTo, setRangeTo] = useState('');
+
+  // A date-ranged report filters each named register to From / To on the
+  // register's own data date field; a row missing that date stays out.
+  const inRange = useCallback((row: RecordRow, field: string, from: string, to: string) => {
+    const v = String(row.data[field] ?? '').trim();
+    if (!v) return false;
+    const d = new Date(`${v}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return true; // unparsable: keep it, do not hide data
+    if (from && d.getTime() < new Date(`${from}T00:00:00`).getTime()) return false;
+    if (to && d.getTime() > new Date(`${to}T23:59:59.999`).getTime()) return false;
+    return true;
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const registers = [...new Set(report.registers)];
+      const rangeMap = report.range?.registers ?? {};
       const pages = await Promise.all(
         registers.map((key) => records.list(key, { limit: limit ?? REPORT_LIMIT })),
       );
       const byKey: Record<string, RecordRow[]> = {};
       registers.forEach((key, i) => {
-        byKey[key] = pages[i]!.items;
+        let items = pages[i]!.items;
+        const field = rangeMap[key];
+        if (field && (rangeFrom || rangeTo)) {
+          items = items.filter((row) => inRange(row, field, rangeFrom, rangeTo));
+        }
+        byKey[key] = items;
       });
+      // A report that opted in with needProjects reads the live project
+      // masters (budget, name) alongside the registers.
+      if (report.needProjects) {
+        const masters = await projects.list({ kind: 'master' });
+        setProjects(masters);
+      }
       setData(byKey);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not run this report');
     } finally {
       setLoading(false);
     }
-  }, [report, limit]);
+  }, [report, limit, rangeFrom, rangeTo, inRange]);
 
   useEffect(() => {
     void load();
@@ -62,9 +90,12 @@ export function ReportRun({
     [data],
   );
 
-  const summary = data ? report.summary?.(data) : undefined;
-  const body = data ? report.rows(data) : [];
-  const footer = data ? report.footer?.(data) : undefined;
+  // needProjects reports get the live masters; every other report ignores ctx.
+  const ctx: ReportContext | undefined =
+    report.needProjects && data ? { projects } : undefined;
+  const summary = data ? report.summary?.(data, ctx) : undefined;
+  const body = data ? report.rows(data, ctx) : [];
+  const footer = data ? report.footer?.(data, ctx) : undefined;
 
   return (
     <Panel
@@ -88,6 +119,44 @@ export function ReportRun({
         <p className="m-0 p-4 text-[12.5px]" style={{ color: 'var(--muted)' }}>
           Loading {report.registers.length} register(s)…
         </p>
+      ) : null}
+
+      {report.range ? (
+        <div
+          className="flex flex-wrap items-center gap-3 border-b px-4 py-2"
+          style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
+        >
+          <label className="flex items-center gap-1.5 text-[12px]" style={{ color: 'var(--muted)' }}>
+            From
+            <input
+              type="date"
+              value={rangeFrom}
+              onChange={(e) => setRangeFrom(e.target.value)}
+              className="rounded px-1.5 py-0.5 text-[12.5px]"
+              style={{ border: '1px solid var(--line)', background: 'var(--panel-2)', color: 'var(--ink)' }}
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-[12px]" style={{ color: 'var(--muted)' }}>
+            To
+            <input
+              type="date"
+              value={rangeTo}
+              onChange={(e) => setRangeTo(e.target.value)}
+              className="rounded px-1.5 py-0.5 text-[12.5px]"
+              style={{ border: '1px solid var(--line)', background: 'var(--panel-2)', color: 'var(--ink)' }}
+            />
+          </label>
+          {(rangeFrom || rangeTo) ? (
+            <button
+              type="button"
+              onClick={() => { setRangeFrom(''); setRangeTo(''); }}
+              className="text-[12px] underline"
+              style={{ color: 'var(--muted)' }}
+            >
+              Clear range
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {!loading && !error && data ? (

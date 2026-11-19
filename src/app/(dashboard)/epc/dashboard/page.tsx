@@ -22,6 +22,7 @@ import {
 } from '@/components/ui';
 import { approvals, records, wbsCpm, type CpmResult } from '@/lib/services';
 import { useProjectData, L } from '@/lib/project-data';
+import { deriveFromPlannerRows } from '@/lib/planner/milestones';
 import type { RecordRow } from '@/lib/types';
 
 /** True when a stored date is today, whatever its time component is. */
@@ -65,6 +66,8 @@ export default function EpcDashboardPage() {
   const [commRows, setCommRows] = useState<RecordRow[]>([]);
   const [raRows, setRaRows] = useState<RecordRow[]>([]);
   const [cpm, setCpm] = useState<CpmResult | null>(null);
+  /** Saved L1 planning schedules for the current project (macro milestones). */
+  const [plannerRows, setPlannerRows] = useState<RecordRow[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -96,6 +99,7 @@ export default function EpcDashboardPage() {
       setHseRows(page.items.filter((r) => String(r.data.status) !== 'Closed')));
     if (p?.id) {
       guard(wbsCpm.criticalPath(p.id), (result) => { if (!cancelled) setCpm(result); });
+      guard(records.list('project_planner', { projectId: p.id, limit: 50 }), (page) => setPlannerRows(page.items));
     }
 
     return () => { cancelled = true; };
@@ -105,10 +109,19 @@ export default function EpcDashboardPage() {
   const manpowerToday = dsrToday.reduce((sum, r) => sum + (Number(r.data.manpower) || 0), 0);
   const hoursLost = dsrToday.reduce((sum, r) => sum + (Number(r.data.hoursLost) || 0), 0);
   const materialReceived = dsrToday.reduce((sum, r) => sum + (Number(r.data.received) || 0), 0);
-  const inFlight = milestones.filter((m) => {
-    const status = String(m.data.status ?? '');
-    return status === 'In progress' || status === 'At risk';
-  }).length;
+
+  /**
+   * Macro-level milestones, derived from the project's L1 planning schedule
+   * (client: the panel must reflect the planner, not a hand-kept register):
+   * the top-level tasks of the latest saved plan, run through the engine.
+   * Status is derived: 100% = Completed, some % = In progress, none =
+   * Not started, a logged actual finish past the plan end = Slipped.
+   */
+  const derivedMilestones = useMemo(() => deriveFromPlannerRows(plannerRows), [plannerRows]);
+
+  const inFlight = (derivedMilestones.length ? derivedMilestones : milestones.map((m) => ({ status: String(m.data.status ?? '') })))
+    .filter((m) => m.status === 'In progress' || m.status === 'At risk')
+    .length;
 
   // --- derived chart data ------------------------------------------------
 
@@ -587,6 +600,7 @@ export default function EpcDashboardPage() {
         <div>
           <Panel
             title="Milestones"
+            sub={derivedMilestones.length ? 'Macro view derived from the L1 planning schedule' : 'Register entries'}
             actions={
               <Button variant="small" onClick={() => router.push('/epc/planning')}>
                 Open planning
@@ -595,29 +609,47 @@ export default function EpcDashboardPage() {
             bodyless
           >
             <DataTable
-              columns={[
-                { key: 'm', label: 'Milestone' },
-                { key: 'o', label: 'Owner' },
-                { key: 'pl', label: 'Planned' },
-                { key: 'fc', label: 'Forecast' },
-                { key: 'pr', label: 'Progress' },
-                { key: 'st', label: 'Status', align: 'right' },
-              ]}
+              columns={
+                derivedMilestones.length
+                  ? [
+                      { key: 'm', label: 'Milestone' },
+                      { key: 'pl', label: 'Planned' },
+                      { key: 'fc', label: 'Forecast' },
+                      { key: 'pr', label: 'Progress' },
+                      { key: 'st', label: 'Status', align: 'right' },
+                    ]
+                  : [
+                      { key: 'm', label: 'Milestone' },
+                      { key: 'o', label: 'Owner' },
+                      { key: 'pl', label: 'Planned' },
+                      { key: 'fc', label: 'Forecast' },
+                      { key: 'pr', label: 'Progress' },
+                      { key: 'st', label: 'Status', align: 'right' },
+                    ]
+              }
               rows={
-                milestones.length === 0
-                  ? [['Add schedule milestones to see progress here.']]
-                  : milestones.map((m): React.ReactNode[] => {
-                      const status = String(m.data.status ?? '');
-                      const progress = Math.min(100, Math.max(0, Number(m.data.progress) || 0));
-                      return [
-                        String(m.data.milestone ?? ''),
-                        String(m.data.owner ?? '—'),
-                        day(m.data.plannedDate),
-                        day(m.data.forecastDate),
-                        <Bar key="b" pct={progress} />,
-                        <Chip key="c" tone={msTone(status)}>{status || '—'}</Chip>,
-                      ];
-                    })
+                derivedMilestones.length
+                  ? derivedMilestones.map((m): React.ReactNode[] => [
+                      m.name,
+                      m.planned,
+                      m.forecast ?? '—',
+                      <Bar key="b" pct={m.progress} />,
+                      <Chip key="c" tone={msTone(m.status)}>{m.status}</Chip>,
+                    ])
+                  : milestones.length === 0
+                    ? [['No L1 schedule yet — open planning to build the project plan.']]
+                    : milestones.map((m): React.ReactNode[] => {
+                        const status = String(m.data.status ?? '');
+                        const progress = Math.min(100, Math.max(0, Number(m.data.progress) || 0));
+                        return [
+                          String(m.data.milestone ?? ''),
+                          String(m.data.owner ?? '—'),
+                          day(m.data.plannedDate),
+                          day(m.data.forecastDate),
+                          <Bar key="b" pct={progress} />,
+                          <Chip key="c" tone={msTone(status)}>{status || '—'}</Chip>,
+                        ];
+                      })
               }
             />
           </Panel>

@@ -172,10 +172,10 @@ export default function EpcInventoryPage() {
         title="Inventory"
         description="Stock on hand, goods received on site, and movement against the minimum stock line."
         actions={
+          // Client CR: GRN creation lives on the Goods Receipts index
+          // (/registers/goods_receipts, "Add entry"), not here. This page
+          // keeps the GRN view / detail / edit — not the raise.
           <>
-            <Button onClick={() => grnType && setForm({ type: grnType, row: null })}>
-              Raise GRN
-            </Button>
             <Button variant="primary" onClick={() => stockType && setForm({ type: stockType, row: null })}>
               Add stock item
             </Button>
@@ -302,7 +302,7 @@ export default function EpcInventoryPage() {
           ]}
           rows={
             grns.length === 0
-              ? [[loading ? 'Loading GRNs…' : 'No goods receipts yet. Use Raise GRN.']]
+              ? [[loading ? 'Loading GRNs…' : 'No goods receipts yet. Raise them on the Goods Receipts index.']]
               : grns.map((g): React.ReactNode[] => {
                   const status = String(g.data.status ?? '');
                   const ap = grnApprovalWord(g.ref);

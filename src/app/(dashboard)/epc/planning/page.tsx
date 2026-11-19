@@ -3,9 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Button, Notice, PageHead } from '@/components/ui';
-import { compute, newTask, PTask, setNextId } from '@/lib/planner/engine';
+import { compute, newTask, PTask } from '@/lib/planner/engine';
+import { milestonesFrom } from '@/lib/planner/milestones';
+import { hydrate, serialize } from '@/lib/planner/plan';
 import { importScheduleGrid } from '@/lib/planner/import';
 import { parseXlsxSheets, XlsxParseError, XlsxCsvGrid } from '@/lib/xlsx-parse';
+import { openPrintReport } from '@/lib/print-report';
 import { projects, records } from '@/lib/services';
 import type { ProjectOption } from '@/lib/services';
 import { useSession } from '@/app/session';
@@ -23,65 +26,25 @@ import type { RecordRow } from '@/lib/types';
  * project (F9). This screen replaces the former register-based Planning & tasks view.
  */
 
-// ── tree ↔ flat-json (the 'plan' field of the saved record) ─────────────
-
-interface PlanNode {
-  id: number;
-  p: number | null;
-  name: string;
-  dur: number;
-  pct: number;
-  pred: number[];
-  open: boolean;
-  rem?: string;
-  as?: string;
-  ae?: string;
-  /** Start offset in days from project start (imported "Start Month"). */
-  off?: number;
-  /** Plan status: 'draft' editable, 'approved' baseline frozen. */
-  st?: string;
-}
-
-function serialize(roots: PTask[]): string {
-  const out: PlanNode[] = [];
-  const walk = (list: PTask[]): void => {
-    for (const t of list) {
-      out.push({ id: t.id, p: t.parent?.id ?? null, name: t.name, dur: t.dur, pct: t.pct, pred: [...t.pred], open: t.open, rem: t.rem ?? '', as: t.as ?? '', ae: t.ae ?? '', off: t.off ?? 0 });
-      walk(t.kids);
-    }
-  };
-  walk(roots);
-  return JSON.stringify(out);
-}
-
-function hydrate(json: string): PTask[] {
-  const nodes: PlanNode[] = JSON.parse(json) as PlanNode[];
-  const byId = new Map<number, PTask>();
-  const roots: PTask[] = [];
-  for (const n of nodes) {
-    const t: PTask = { id: n.id, name: n.name, dur: Math.max(1, n.dur), pct: n.pct, pred: [...n.pred], open: n.open, rem: n.rem ?? '', as: n.as ?? '', ae: n.ae ?? '', off: n.off ? Math.round(n.off) : undefined, kids: [], parent: null };
-    byId.set(n.id, t);
-    if (n.p === null || !byId.has(n.p)) roots.push(t);
-  }
-  for (const n of nodes) {
-    const t = byId.get(n.id)!;
-    if (n.p !== null) {
-      const parent = byId.get(n.p);
-      if (parent) {
-        t.parent = parent;
-        parent.kids.push(t);
-      }
-    }
-  }
-  setNextId(nodes.length ? Math.max(...nodes.map((n) => n.id)) + 1 : 1);
-  return roots;
-}
-
 // ── helpers ───────────────────────────────────────────────────────────────
 
-function Card({ label, value }: { label: string; value: React.ReactNode }): React.JSX.Element {
+function Card({
+  label,
+  value,
+  onClick,
+  active,
+}: {
+  label: string;
+  value: React.ReactNode;
+  onClick?: () => void;
+  active?: boolean;
+}): React.JSX.Element {
   return (
-    <div className="planner-card">
+    <div
+      className={`planner-card${onClick ? ' planner-card-btn' : ''}`}
+      onClick={onClick}
+      style={active ? { outline: '2px solid #1e40af', outlineOffset: 2 } : undefined}
+    >
       {label}
       <b>{value}</b>
     </div>
@@ -90,6 +53,9 @@ function Card({ label, value }: { label: string; value: React.ReactNode }): Reac
 
 const fmt = (d: Date): string => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' });
 const st = (pct: number): string => (pct >= 100 ? 'done' : pct > 0 ? 'prog' : 'todo');
+
+/** L1 column labels for the width adjuster (client spec 7). Index = th order. */
+const L1_COLS: string[] = ['Task no.', 'Task description', 'Duration', 'Depends on', 'Float / Slack', 'Plan start', 'Plan end', 'Actual start', 'Actual finish', '% complete', 'Delay', 'Remarks'];
 
 /** a is an ancestor of b? */
 function isAncestor(a: PTask, b: PTask): boolean {
@@ -132,6 +98,10 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   const readyRef = useRef(false); // true only after the plan load for the current project finished
   /** An imported plan has no record row yet — the auto-save effect must create one. */
   const pendingCreate = useRef(false);
+  /** Clicking the Critical tasks card filters the table to critical tasks only (toggle). */
+  const [critOnly, setCritOnly] = useState(false);
+  /** Column-width overrides for the L1 table (client spec 7); null = panel closed. */
+  const [colW, setColW] = useState<Record<number, number> | null>(null);
 
   const l1Ref = useRef<HTMLDivElement>(null);
   const unifiedRef = useRef<HTMLDivElement>(null);
@@ -269,6 +239,10 @@ export default function ProjectPlannerPage(): React.JSX.Element {
         }
       }
       setSaveState('saved');
+      // Keep the macro milestone register in step with the plan (client:
+      // "schedule milestones reflect the L1 schedule"). Best-effort — a failed
+      // sync never fails the plan save itself.
+      void syncMilestones();
     } catch (err) {
       setSaveState('error');
       if (!silent) {
@@ -276,6 +250,44 @@ export default function ProjectPlannerPage(): React.JSX.Element {
       }
     }
   }, [planName, planRowId, projectId, res, roots, startDate, approvedBy]);
+
+  /**
+   * Upsert the plan's top-level phases into the `schedule_milestones`
+   * register so the milestone screen (and the dashboard panel that reads
+   * that register) mirrors the L1 macro view. Rows are matched by phase
+   * name; a phase dropped from the plan leaves its row untouched — manual
+   * entries are not deleted out from under the client.
+   */
+  const syncMilestones = async (): Promise<void> => {
+    if (!projectId || !res) return;
+    try {
+      const ms = milestonesFrom(res);
+      if (!ms.length) return;
+      const existing = await records.list('schedule_milestones', { projectId, limit: 500 });
+      const byName = new Map(existing.items.map((r) => [String(r.data.milestone ?? '').trim().toLowerCase(), r.id]));
+      for (const m of ms) {
+        const key = m.name.trim().toLowerCase();
+        const payload: Record<string, unknown> = {
+          data: {
+            milestone: m.name,
+            plannedDate: m.planned,
+            forecastDate: m.forecast ?? '',
+            progress: m.progress,
+            status: m.status,
+          },
+          projectId,
+        };
+        const id = byName.get(key);
+        if (id) {
+          await records.update('schedule_milestones', id, payload);
+        } else {
+          await records.create('schedule_milestones', payload);
+        }
+      }
+    } catch {
+      /* milestone sync is best-effort; the plan save already succeeded */
+    }
+  };
 
   /** Approve the baseline: freeze every plan column, keep actuals live. */
   const approveBaseline = (): void => {
@@ -568,6 +580,113 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   /** Auto-focus the name input of the row just added. */
   const [focusId, setFocusId] = useState(0);
 
+  /** Client spec 6: the whole L1 schedule as an Excel-compatible CSV. */
+  const downloadExcel = (): void => {
+    if (!res) return;
+    const head = ['Task no.', 'Task description', 'Duration (days)', 'Depends on', 'Float / Slack (F/T days)', 'Plan start', 'Plan end', 'Actual start', 'Actual finish', '% complete', 'Delay (days)', 'Remarks', 'Status'];
+    const lines = [head.join(',')];
+    const q = (s: string): string => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+    const walk = (list: PTask[]): void => {
+      for (const t of list) {
+        const cc = res.c.get(t.id)!;
+        const phase = t.kids.length > 0;
+        // Free float / total slack (MS Project): "F / T".
+        const pair = phase ? `— / ${cc.slack}` : `${cc.float} / ${cc.slack}`;
+        const delay = delayOf(t, cc.finish);
+        const row = [
+          displayNum(t),
+          t.name,
+          String(cc.dur),
+          depText(t),
+          pair,
+          fmt(cc.start),
+          fmt(cc.finish),
+          phase ? actualsOf(t).start ?? '' : t.as ?? '',
+          phase ? actualsOf(t).finish ?? '' : t.ae ?? '',
+          `${cc.pct}%`,
+          delay === null ? '—' : String(delay),
+          t.rem ?? '',
+          cc.crit ? 'Critical' : phase ? 'Phase' : cc.pct >= 100 ? 'Done' : cc.pct > 0 ? 'In progress' : 'Not started',
+        ];
+        lines.push(row.map(q).join(','));
+        walk(t.kids);
+      }
+    };
+    walk(roots);
+    // BOM prefix so Excel detects UTF-8 (task names can carry non-ASCII).
+    const BOM = String.fromCharCode(0xfeff);
+    const blob = new Blob([BOM + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${planName.replace(/[^\w-]+/g, '_')}_schedule.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /** Client spec 6: a printable PDF via the shared letterhead print window. */
+  const downloadPdf = (): void => {
+    if (!res) return;
+    const head = ['Task no.', 'Task description', 'Days', 'Depends on', 'Float/Slack', 'Plan start', 'Plan end', 'Act. start', 'Act. finish', '%', 'Delay', 'Remarks'];
+    const rows: string[][] = [];
+    const walk = (list: PTask[]): void => {
+      for (const t of list) {
+        const cc = res.c.get(t.id)!;
+        const phase = t.kids.length > 0;
+        const delay = delayOf(t, cc.finish);
+        rows.push([
+          displayNum(t),
+          t.name,
+          String(cc.dur),
+          depText(t),
+          phase ? `— / ${cc.slack}` : `${cc.float} / ${cc.slack}`,
+          fmt(cc.start),
+          fmt(cc.finish),
+          phase ? actualsOf(t).start ?? '—' : t.as || '—',
+          phase ? actualsOf(t).finish ?? '—' : t.ae || '—',
+          `${cc.pct}%`,
+          delay === null ? '—' : String(delay),
+          t.rem || '',
+        ]);
+        walk(t.kids);
+      }
+    };
+    walk(roots);
+    openPrintReport({
+      title: 'Project schedule',
+      sub: planName,
+      meta: [
+        `${allProjects.find((p) => p.id === projectId)?.name ?? planName} · ${fmt(res.stats.start)} → ${fmt(res.stats.finish)} · ${res.stats.duration} days`,
+        frozen ? `Approved baseline · ${approvedBy}` : 'Draft',
+      ],
+      tables: [{ title: 'Schedule', head, rows, aligns: ['left', 'left', 'right', 'left', 'right', 'right', 'right', 'right', 'right', 'right', 'right', 'left'] }],
+      notes: `Phases: ${res.stats.phases} · Tasks: ${res.stats.tasks} · Critical tasks: ${res.stats.critical} · Progress: ${Math.round(res.stats.progress)}%`,
+      signatures: ['Prepared by', 'Checked by', 'Approved by'],
+    });
+  };
+
+  /**
+   * Phase actuals (client spec 2): a phase's actual start is the minimum of
+   * its leaves' actual starts; its actual finish the maximum of their
+   * actual finishes. No manual entry on summary rows.
+   */
+  const actualsOf = (t: PTask): { start?: string; finish?: string } => {
+    let start: string | undefined;
+    let finish: string | undefined;
+    const scan = (list: PTask[]): void => {
+      for (const x of list) {
+        if (x.kids.length) {
+          scan(x.kids);
+          continue;
+        }
+        if (x.as && (!start || x.as < start)) start = x.as;
+        if (x.ae && (!finish || x.ae > finish)) finish = x.ae;
+      }
+    };
+    scan(t.kids);
+    return { start, finish };
+  };
+
   /** WBS of a task, computed straight from the tree (before the next engine pass). */
   const wbsOf = useCallback((t: PTask): string => {
     const parts: string[] = [];
@@ -619,6 +738,32 @@ export default function ProjectPlannerPage(): React.JSX.Element {
   const GANTT_TABLE_W = 640;
   const DAY = 86_400_000;
   const visible = res?.visible ?? [];
+
+  /**
+   * Client spec 8: the Critical tasks card filters the schedule to critical
+   * tasks only. Phases stay in as headers when any descendant leaf is
+   * critical; the rest is hidden until the toggle is switched off.
+   */
+  const shown = useMemo((): PTask[] => {
+    if (!critOnly || !res) return visible;
+    const critIds = new Set(res.leaves.filter((l) => res.c.get(l.id)!.crit).map((l) => l.id));
+    const keep: PTask[] = [];
+    const hasCrit = (list: PTask[]): boolean =>
+      list.some((x) => (x.kids.length ? hasCrit(x.kids) : critIds.has(x.id)));
+    const walk = (list: PTask[]): void => {
+      for (const t of list) {
+        if (t.kids.length) {
+          if (hasCrit(t.kids)) {
+            keep.push(t);
+            walk(t.kids);
+          }
+        } else if (critIds.has(t.id)) keep.push(t);
+      }
+    };
+    walk(roots);
+    return keep;
+  }, [critOnly, res, visible, roots]);
+
   const end = res?.end ?? 1;
   const p0 = res?.p0 ?? new Date();
   const days = end + 16;
@@ -801,6 +946,20 @@ export default function ProjectPlannerPage(): React.JSX.Element {
           <button type="button" className="p" onClick={() => fileRef.current?.click()}>
             Import Excel
           </button>
+          <button type="button" className="p" onClick={() => downloadExcel()} disabled={!res} title="Excel-compatible .csv (opens in Excel)">
+            Excel
+          </button>
+          <button type="button" className="p" onClick={() => downloadPdf()} disabled={!res} title="Printable PDF via the print window">
+            PDF
+          </button>
+          <button
+            type="button"
+            className={colW ? 'p' : 'v'}
+            onClick={() => setColW({})}
+            title="Adjust L1 column widths to read wrapped text"
+          >
+            Column widths
+          </button>
           <input
             ref={fileRef}
             type="file"
@@ -844,6 +1003,49 @@ export default function ProjectPlannerPage(): React.JSX.Element {
         </div>
       ) : null}
 
+      {critOnly ? (
+        <div className="planner-notice">
+          Showing critical tasks only — click the Critical tasks card again to show all.
+          <button type="button" onClick={() => setCritOnly(false)}>
+            Show all
+          </button>
+        </div>
+      ) : null}
+
+      {colW ? (
+        <div className="planner-notice">
+          <b>Column widths (L1 view)</b> — set a pixel width to read wrapped text; empty = default.
+          <div className="colwidths">
+            {L1_COLS.map((label, i) => (
+              <label key={label}>
+                {label}
+                <input
+                  type="number"
+                  min={0}
+                  placeholder="auto"
+                  value={colW[i] ?? ''}
+                  onChange={(e) => {
+                    const v = e.target.value === '' ? undefined : Number(e.target.value);
+                    setColW((p) => {
+                      const next = { ...(p ?? {}) };
+                      if (v === undefined || Number.isNaN(v)) delete next[i];
+                      else next[i] = v;
+                      return next;
+                    });
+                  }}
+                />
+              </label>
+            ))}
+            <button type="button" className="v" onClick={() => setColW({})}>
+              Reset
+            </button>
+            <button type="button" className="p" onClick={() => setColW(null)}>
+              Done
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {sheetPick ? (
         <div className="planner-notice planner-notice-info">
           <b>{sheetPick.file.name}</b> has {sheetPick.sheets.length} tabs — pick which one to import:
@@ -876,7 +1078,15 @@ export default function ProjectPlannerPage(): React.JSX.Element {
           <Card label="Finish" value={fmt(stats.finish)} />
           <Card label="Duration" value={`${stats.duration} days`} />
           <Card label="Progress" value={`${Math.round(stats.progress)}%`} />
-          <Card label="Critical tasks" value={stats.critical} />
+          <Card
+            label="Critical tasks"
+            value={stats.critical}
+            active={critOnly}
+            onClick={() => {
+              setCritOnly((v) => !v);
+              setView('l1');
+            }}
+          />
         </div>
       ) : null}
 
@@ -1037,33 +1247,40 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                 </span>
               </div>
             ) : null}
-            <table className="l1">
+            <div className="l1-scroll">
+            <table className={`l1${colW ? ' l1-w' : ''}`}>
               <thead>
                 <tr>
-                  <th style={{ width: 64 }}>Task no.</th>
-                  <th>Task description</th>
-                  <th style={{ width: 74 }}>Duration</th>
-                  <th style={{ width: 104 }}>Depends on</th>
-                  <th style={{ width: 48 }}>Float / Slack</th>
-                  <th style={{ width: 74 }}>Plan start</th>
-                  <th style={{ width: 74 }}>Plan end</th>
-                  <th style={{ width: 108 }}>Actual start</th>
-                  <th style={{ width: 108 }}>Actual finish</th>
-                  <th style={{ width: 64 }}>% complete</th>
-                  <th style={{ width: 58 }}>Delay</th>
-                  <th style={{ width: 120 }}>Remarks</th>
+                  <th style={{ width: colW ? colW[0] : 64 }}>Task no.</th>
+                  {/* Capped description column: long names scroll inside the
+                      input instead of stretching the table (fixed layout). */}
+                  <th style={colW ? { width: colW[1] } : { width: 300 }}>Task description</th>
+                  <th style={{ width: colW ? colW[2] : 74 }}>Duration</th>
+                  <th style={{ width: colW ? colW[3] : 104 }}>Depends on</th>
+                  <th style={{ width: colW ? colW[4] : 48 }}>Float / Slack</th>
+                  <th style={{ width: colW ? colW[5] : 84 }}>Plan start</th>
+                  <th style={{ width: colW ? colW[6] : 84 }}>Plan end</th>
+                  <th style={{ width: colW ? colW[7] : 140 }}>Actual start</th>
+                  <th style={{ width: colW ? colW[8] : 140 }}>Actual finish</th>
+                  <th style={{ width: colW ? colW[9] : 64 }}>% complete</th>
+                  <th style={{ width: colW ? colW[10] : 58 }}>Delay</th>
+                  <th style={{ width: colW ? colW[11] : 120 }}>Remarks</th>
                   <th style={{ width: 40 }} />
                 </tr>
               </thead>
               <tbody>
-                {visible.map((t) => {
+                {shown.map((t) => {
                   if (!res) return null;
                   const c = res.c.get(t.id)!;
                   const s = t.kids.length > 0;
-                  // Free float in days, matching the engine's critical test
-                  // (lf - es - dur <= 0): critical tasks must show 0, not 1.
-                  const slack = Math.max(0, c.lf - c.es - c.dur);
+                  // Client spec 5: float = the dependent activity's Plan Start
+                  // minus this Plan End (the engine's successor-based float).
+                  // MS Project semantics: free float / total slack, shown as
+                  // "F / T". F = dependent's Plan Start − this Plan End;
+                  // T = how much the task can slip without moving the project.
+                  const slack = `${c.float} / ${c.slack}`;
                   const delay = s ? null : delayOf(t, c.finish);
+                  const phaseAct = s ? actualsOf(t) : null;
                   return (
                     <tr key={t.id} className={s ? 'l1-phase' : 'l1-task'}>
                       <td className="l1-num" onClick={() => pick(t.id)}>
@@ -1111,24 +1328,36 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                           onBlur={(e) => upDepL1(t, e.target.value)}
                         />
                       </td>
-                      <td className="l1-c" title="Days of free float: the task can slip this much without moving the project finish">{s ? c.dur > 1 ? slack : '—' : slack}</td>
+                      <td className="l1-c" title="F = free float (days until the dependent activity's Plan Start); T = total slack (how much the task can slip without moving the project finish)">{s ? `— / ${c.slack}` : slack}</td>
                       <td className="l1-c">{fmt(c.start)}</td>
                       <td className="l1-c">{fmt(c.finish)}</td>
                       <td className="l1-c">
-                        <input
-                          key={`L1as${t.id}:${t.as ?? ''}`}
-                          type="date"
-                          value={t.as ?? ''}
-                          onChange={(e) => upAct(t, 'as', e.target.value)}
-                        />
+                        {s ? (
+                          // Client spec 2: phase actual start = the minimum
+                          // of its subtask actual starts (read-only).
+                          <span className="l1-actauto" title="Auto: earliest subtask actual start">{phaseAct!.start || '—'}</span>
+                        ) : (
+                          <input
+                            key={`L1as${t.id}:${t.as ?? ''}`}
+                            type="date"
+                            value={t.as ?? ''}
+                            onChange={(e) => upAct(t, 'as', e.target.value)}
+                          />
+                        )}
                       </td>
                       <td className="l1-c">
-                        <input
-                          key={`L1ae${t.id}:${t.ae ?? ''}`}
-                          type="date"
-                          value={t.ae ?? ''}
-                          onChange={(e) => upAct(t, 'ae', e.target.value)}
-                        />
+                        {s ? (
+                          // Phase actual finish = the maximum of its subtask
+                          // actual finishes (read-only).
+                          <span className="l1-actauto" title="Auto: latest subtask actual finish">{phaseAct!.finish || '—'}</span>
+                        ) : (
+                          <input
+                            key={`L1ae${t.id}:${t.ae ?? ''}`}
+                            type="date"
+                            value={t.ae ?? ''}
+                            onChange={(e) => upAct(t, 'ae', e.target.value)}
+                          />
+                        )}
                       </td>
                       <td className="l1-c">
                         {s ? c.pct + '%' : (
@@ -1176,6 +1405,7 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         ) : null}
 
@@ -1292,8 +1522,11 @@ const PLANNER_CSS = `
 .planner-root .planner-toolbar button.v{padding:5px 12px;border:1px solid rgba(255,255,255,.4);background:rgba(255,255,255,.08);color:#fff;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600}
 .planner-root .planner-toolbar button.v.on{background:#1e40af;border-color:#1e40af}
 .planner-root .l1-off{display:none}
-.planner-root .l1-view{flex:1;overflow:auto;background:#fff}
-.planner-root .l1-title{display:flex;justify-content:space-between;align-items:baseline;gap:10px;background:#c8a8d6;color:#1e1b4b;padding:7px 12px;font-size:13px;position:sticky;top:0;z-index:4}
+.planner-root .l1-view{flex:1;overflow:hidden;background:#fff;display:flex;flex-direction:column}
+/* The table's own scroller: horizontal for long schedules, vertical for
+   long task lists. The title bar above it never scrolls out of view. */
+.planner-root .l1-scroll{flex:1;overflow:auto}
+.planner-root .l1-title{flex:none;display:flex;justify-content:space-between;align-items:baseline;gap:10px;background:#c8a8d6;color:#1e1b4b;padding:7px 12px;font-size:13px}
 .planner-root .l1-title b{font-size:14px}
 .planner-root .l1-title span{font-size:11.5px;color:#3b2a63}
 .planner-root .l1-title em{font-style:normal;font-weight:700;font-size:11px;padding:2px 8px;border-radius:10px;margin-left:8px}
@@ -1301,10 +1534,15 @@ const PLANNER_CSS = `
 .planner-root .l1-title em.l1-draft{background:#3b2a63;color:#e9d5ff}
 .planner-root .l1 td.l1-delay.late{color:#b91c1c;font-weight:700}
 .planner-root .l1 td.l1-delay.early{color:#16a34a;font-weight:700}
-.planner-root .l1 input[type=date]{width:100%;border:1px solid transparent;background:transparent;padding:2px 4px;font-size:12px;color:#1e293b}
+.planner-root .l1 input[type=date]{width:100%;min-width:118px;border:1px solid transparent;background:transparent;padding:2px 4px;font-size:12px;color:#1e293b}
 .planner-root .l1 input[type=date]:hover,.planner-root .l1 input[type=date]:focus{border-color:#94a3b8;background:#fff;outline:none}
-.planner-root .l1 table, .planner-root table.l1{border-collapse:collapse;width:100%;font-size:12.5px;color:#1e293b}
-.planner-root .l1 thead th{position:sticky;top:33px;background:#c9a9d8;color:#1e1b4b;text-align:left;padding:6px 6px;font-size:12px;font-weight:700;z-index:3;border-bottom:1px solid #b795c9}
+/* The table fills the view width; the Task description column is capped and
+   long names scroll inside their cell instead of pushing the date columns
+   off screen (client: descriptions complete AND dates fully visible). */
+/* The table is wider than most screens, so .l1-scroll shows a horizontal
+   scroller — Task description and the dates stay fully readable. */
+.planner-root .l1 table, .planner-root table.l1{border-collapse:collapse;width:100%;min-width:1400px;font-size:12.5px;color:#1e293b}
+.planner-root .l1 thead th{position:sticky;top:0;background:#c9a9d8;color:#1e1b4b;text-align:left;padding:6px 6px;font-size:12px;font-weight:700;z-index:3;border-bottom:1px solid #b795c9}
 .planner-root .l1 td{padding:4px 6px;border-bottom:1px solid #dbe4f0;white-space:nowrap}
 .planner-root .l1 td input{width:100%;border:1px solid transparent;background:transparent;padding:2px 4px;font-size:12.5px;color:#1e293b}
 .planner-root .l1 td input:hover,.planner-root .l1 td input:focus{border-color:#94a3b8;background:#fff;outline:none}
@@ -1319,4 +1557,21 @@ const PLANNER_CSS = `
 .planner-root .planner-tip{padding:10px 4px 4px;color:#475569;font-size:12px;line-height:1.6}
 .planner-root .planner-lg{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:4px}
 .planner-root .planner-lg span:before{content:"";display:inline-block;width:12px;height:8px;border-radius:2px;margin-right:5px;background:var(--c)}
+/* Clickable KPI card (client spec 8) */
+.planner-root .planner-card-btn{cursor:pointer}
+.planner-root .planner-card-btn:hover{background:#eef4ff}
+/* Column-width adjuster panel (client spec 7) */
+.planner-root .colwidths{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+.planner-root .colwidths label{font-size:11.5px;color:#334155;display:flex;align-items:center;gap:4px}
+.planner-root .colwidths input{width:64px;padding:3px 5px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px}
+.planner-root .colwidths button.v{background:#fff;color:#64748b;border:1px solid #cbd5e1}
+.planner-root .colwidths button.p{background:#1e40af;color:#fff;border:1px solid #1e40af}
+.planner-root .planner-notice button{margin-left:8px;padding:2px 8px;border-radius:4px;font-size:11.5px;cursor:pointer;background:#1e40af;color:#fff;border:1px solid #1e40af}
+/* Phase actuals are auto-derived, not editable (client spec 2) */
+.planner-root .l1-actauto{font-style:italic;color:#475569;font-size:12px}
+.planner-root .l1 .l1-actauto:before{content:"≈ "}
+/* When a custom width is set, lock the table so widths hold */
+.planner-root table.l1.l1-w{table-layout:fixed;width:auto;min-width:100%}
+.planner-root table.l1.l1-w th,.planner-root table.l1.l1-w td{overflow:hidden;text-overflow:ellipsis}
+.planner-root table.l1.l1-w td input{white-space:normal}
 `;

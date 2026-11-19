@@ -66,6 +66,18 @@ export interface CTask {
   es: number;
   /** Latest finish, in days from project start. */
   lf: number;
+  /**
+   * Free float in days, MS Project convention: the gap between this task's
+   * early finish and the dependent activity's early start. Zero = the
+   * dependent starts the very next day. No dependent activity → 0.
+   */
+  float: number;
+  /**
+   * Total slack in days (MS Project's "Total Float"): late finish − early
+   * finish. Terminal tasks carry their slack to the project end; a zero
+   * total slack marks the critical path.
+   */
+  slack: number;
   /** Critical (leaf, slack 0). Summaries always false. */
   crit: boolean;
   /** Effective duration: leaf dur, or the phase span (min 1). */
@@ -224,15 +236,23 @@ export function compute(roots: PTask[], startDate: string): ComputeResult {
 
   // 3. Expand each leaf's predecessors to leaf level. A link to your own
   //    ancestor/descendant is a no-op (the spec forbids it; the demo ignores
-  //    bad entries, and so do we here).
+  //    bad entries, and so do we here). Also records, for every predecessor
+  //    leaf, which activity (the leaf itself or its phase) depends on it —
+  //    the client's float rule needs the dependent activity, not a leaf.
   const leaves = all.filter((t) => t.kids.length === 0);
   const pl = new Map<number, Set<number>>();
+  const actSucc = new Map<number, Set<number>>(); // pred-leaf id -> dependent activity ids
   for (const l of leaves) {
     const set = new Set<number>();
     for (let a: PTask | null = l; a; a = a.parent) {
       for (const pid of a.pred) {
         const q = byId.get(pid);
-        if (q && !isInside(q, l)) for (const leaf of lvOf(q)) set.add(leaf);
+        if (!q || isInside(q, l)) continue;
+        for (const leaf of lvOf(q)) {
+          set.add(leaf);
+          if (!actSucc.has(leaf)) actSucc.set(leaf, new Set());
+          actSucc.get(leaf)!.add(a.id);
+        }
       }
     }
     pl.set(l.id, set);
@@ -286,6 +306,36 @@ export function compute(roots: PTask[], startDate: string): ComputeResult {
     if ((lf.get(l.id) ?? end) - l.dur - (es.get(l.id) ?? 0) <= 0) crit.add(l.id);
   }
 
+  // 6b. Free float per the client's formula: the Plan Start of the dependent
+  //     activity minus this task's Plan End, in days. The dependent is the
+  //     activity that schedules after this one — a successor leaf's task, or
+  //     its phase (a phase's Plan Start = its earliest leaf start). No
+  //     dependent activity: 0, nothing waits on the tail.
+  const activityStart = (aid: number): number => {
+    const a = byId.get(aid)!;
+    return a.kids.length ? Math.min(...a.kids.flatMap(lvOf).map((x) => es.get(x) ?? 0)) : (es.get(aid) ?? 0);
+  };
+  /**
+   * Per-leaf float/slack pair, MS Project convention:
+   *  - free float = the gap between the early finish boundary and the
+   *    dependent activity's early start; adjacent tasks give 0. No
+   *    dependent activity: 0 (its slack lives in total slack).
+   *  - total slack = late finish − early finish; terminal tasks carry
+   *    theirs to the project end, 0 marks the critical path.
+   */
+  const leafFloat = (id: number): { float: number; slack: number } => {
+    const earlyFinish = (es.get(id) ?? 0) + (byId.get(id)?.dur ?? 1);
+    const succs = actSucc.get(id);
+    let free = 0;
+    if (succs && succs.size > 0) {
+      let g = Infinity;
+      for (const a of succs) g = Math.min(g, activityStart(a) - earlyFinish);
+      free = Math.max(0, Math.round(g));
+    }
+    const total = Math.max(0, Math.round((lf.get(id) ?? end) - earlyFinish));
+    return { float: free, slack: total };
+  };
+
   // 7. Assemble the derived map: leaves get crit/slack, summaries roll up.
   const c = new Map<number, CTask>();
   for (const t of all) {
@@ -300,18 +350,21 @@ export function compute(roots: PTask[], startDate: string): ComputeResult {
       // child LF that the summary must not pass), so float = lf - es - dur
       // shows the phase's real slack instead of always 0.
       const lfMax = Math.max(...ids.map((id) => lf.get(id) ?? end));
+      // A phase's float/slack is its tightest leaf's.
+      const pair = ids.map(leafFloat).reduce((a, b) => ({ float: Math.min(a.float, b.float), slack: Math.min(a.slack, b.slack) }), { float: Infinity, slack: Infinity });
       c.set(t.id, {
         wbs: t.wbs!, depth: t.depth!, lv: ids,
-        es: esMin, lf: lfMax, crit: false, dur, pct,
+        es: esMin, lf: lfMax, float: pair.float, slack: pair.slack, crit: false, dur, pct,
         start: new Date(p0.getTime() + esMin * DAY),
         finish: new Date(p0.getTime() + (esMin + dur - 1) * DAY),
         isPhase: true,
       });
     } else {
       const e = es.get(t.id) ?? 0;
+      const ff = leafFloat(t.id);
       c.set(t.id, {
         wbs: t.wbs!, depth: t.depth!, lv: [t.id],
-        es: e, lf: lf.get(t.id) ?? end, crit: crit.has(t.id),
+        es: e, lf: lf.get(t.id) ?? end, float: ff.float, slack: ff.slack, crit: crit.has(t.id),
         dur: t.dur, pct: t.pct,
         start: new Date(p0.getTime() + e * DAY),
         finish: new Date(p0.getTime() + (e + t.dur - 1) * DAY),

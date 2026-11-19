@@ -54,14 +54,27 @@ export interface ReportDef {
   /** Sort column offered above the table. Built from the loaded registers. */
   sortKeys?: { key: string; label: string }[];
   columns: Column[];
-  /** Builds the table body. Receives every loaded register by key. */
-  rows: (data: Record<string, RecordRow[]>) => React.ReactNode[][];
+  /** Builds the table body. Receives every loaded register by key, and the
+   * live project masters when the definition opted in with needProjects. */
+  rows: (data: Record<string, RecordRow[]>, ctx?: ReportContext) => React.ReactNode[][];
   /** A row of summary figures shown above the table. */
-  summary?: (data: Record<string, RecordRow[]>) => { label: string; value: string; tone?: Tone }[];
+  summary?: (data: Record<string, RecordRow[]>, ctx?: ReportContext) => { label: string; value: string; tone?: Tone }[];
   /** Free-form chart or strip rendered under the table. */
-  footer?: (data: Record<string, RecordRow[]>) => React.ReactNode;
+  footer?: (data: Record<string, RecordRow[]>, ctx?: ReportContext) => React.ReactNode;
   /** Shown on the card so a user knows before clicking. */
   caveat?: string;
+  /** Other Requirements (client): the report runs per selected date range.
+   * When true the run panel shows From / To pickers; each register in the map
+   * is filtered by the named data date field, rows without it stay out. */
+  range?: { registers: Record<string, string> };
+  /** The report reads the live project masters (budget, contract value) as
+   * well as registers; the runner loads them and passes them through as ctx. */
+  needProjects?: boolean;
+}
+
+/** Live project masters, passed to rows / summary of reports that opt in. */
+export interface ReportContext {
+  projects: import('@/lib/services').ProjectOption[];
 }
 
 const EXPIRY_WINDOW_DAYS = 45;
@@ -656,6 +669,277 @@ export const REPORTS: ReportDef[] = [
             {ordered - received > 0 ? lakh(ordered - received) : '—'}
           </span>,
         ]]);
+    },
+  },
+
+  // ── Other Requirements (client): the three date-ranged register reports ──
+  // Each runs against one live register, filtered to From / To on the
+  // register's own date field, and shows the client's columns: item,
+  // quantity, amount, remarks. Sr No is the row position.
+  {
+    id: 'inventory-range',
+    title: 'Inventory report (by date)',
+    description: 'Store stock lines taken within a date range, with balance value and remarks.',
+    registers: ['inventory_stock'],
+    range: { registers: { inventory_stock: 'asOf' } },
+    sortKeys: [{ key: 'asOf', label: 'As of date' }],
+    columns: [
+      { key: 'n', label: 'Sr No' },
+      { key: 'item', label: 'Item Description' },
+      { key: 'qty', label: 'Qty', align: 'right', total: '' },
+      { key: 'amount', label: 'Amount', align: 'right', total: 'Total' },
+      { key: 'remark', label: 'Remarks' },
+    ],
+    rows: (data) => {
+      const rows = data.inventory_stock ?? [];
+      return rows.map((r, i) => {
+        // Balance = received − issued + returned, the same rule the
+        // Inventory page uses; value is balance × rate (₹ -> ₹L).
+        const onHand = num(r.data.received) - num(r.data.issued) + num(r.data.returned);
+        const rate = num(r.data.rate);
+        const value = rate > 0 ? onHand * rate : 0;
+        return [
+          <span key="n" className="num text-[12px]" style={{ color: 'var(--muted)' }}>{i + 1}</span>,
+          str(r.data.item),
+          <span key="q" className="num">{String(onHand)}</span>,
+          <span key="a" className="num">{value > 0 ? `₹${lakh(value / 100000)}L` : '—'}</span>,
+          str(r.data.remark),
+        ];
+      });
+    },
+  },
+  {
+    id: 'consumption-range',
+    title: 'Consumption report (by date)',
+    description: 'Material issued to site activities within a date range, with value and remarks.',
+    registers: ['material_issue'],
+    range: { registers: { material_issue: 'issuedOn' } },
+    sortKeys: [{ key: 'issuedOn', label: 'Issue date' }],
+    columns: [
+      { key: 'n', label: 'Sr No' },
+      { key: 'item', label: 'Item Description' },
+      { key: 'qty', label: 'Qty', align: 'right', total: '' },
+      { key: 'amount', label: 'Amount', align: 'right', total: 'Total' },
+      { key: 'remark', label: 'Remarks' },
+    ],
+    summary: (data) => {
+      const rows = data.material_issue ?? [];
+      return [
+        { label: 'Issues in range', value: String(rows.length) },
+        { label: 'Qty issued', value: String(sumField(rows, 'quantity')) },
+        { label: 'Value issued', value: `₹${lakh(sumField(rows, 'amount'))}L` },
+      ];
+    },
+    rows: (data) => {
+      const rows = data.material_issue ?? [];
+      return rows.map((r, i) => [
+        <span key="n" className="num text-[12px]" style={{ color: 'var(--muted)' }}>{i + 1}</span>,
+        str(r.data.item),
+        <span key="q" className="num">{String(num(r.data.quantity))}</span>,
+        <span key="a" className="num">{num(r.data.amount) > 0 ? `₹${lakh(num(r.data.amount))}L` : '—'}</span>,
+        str(r.data.remark),
+      ]);
+    },
+  },
+  {
+    id: 'grn-range',
+    title: 'GRN report (by date)',
+    description: 'Goods receipts within a date range, with quantity, value and remarks.',
+    registers: ['goods_receipts'],
+    range: { registers: { goods_receipts: 'receivedOn' } },
+    sortKeys: [{ key: 'receivedOn', label: 'Receipt date' }],
+    columns: [
+      { key: 'n', label: 'Sr No' },
+      { key: 'date', label: 'GRN date' },
+      { key: 'item', label: 'Item Description' },
+      { key: 'qty', label: 'Qty', align: 'right', total: '' },
+      { key: 'amount', label: 'Amount', align: 'right', total: 'Total' },
+      { key: 'remark', label: 'Remarks' },
+    ],
+    summary: (data) => {
+      const rows = data.goods_receipts ?? [];
+      return [
+        { label: 'Receipts in range', value: String(rows.length) },
+        { label: 'Qty received', value: String(sumField(rows, 'quantity')) },
+        { label: 'Value received', value: `₹${lakh(sumField(rows, 'amount'))}L` },
+      ];
+    },
+    rows: (data) => {
+      const rows = data.goods_receipts ?? [];
+      return rows.map((r, i) => [
+        <span key="n" className="num text-[12px]" style={{ color: 'var(--muted)' }}>{i + 1}</span>,
+        <span key="d" className="num text-[12px]">{fmtDate(r.data.receivedOn)}</span>,
+        str(r.data.item),
+        <span key="q" className="num">{String(num(r.data.quantity))}</span>,
+        <span key="a" className="num">{num(r.data.amount) > 0 ? `₹${lakh(num(r.data.amount))}L` : '—'}</span>,
+        str(r.data.remark),
+      ]);
+    },
+  },
+
+  // ── Project WIP Finance report (client spec) ──────────────────────────
+  // Per project: Budget from the live master; Committed = value of PRs /
+  // POs made; Actual = advance paid to the vendor + GRN posted by the
+  // store keeper; Assigned = Actual + Committed + remaining order plan.
+  //
+  // Client template: one FY section, each project as a bold header row,
+  // then the six discipline sub-rows (Process / Civil / Mechanical /
+  // Electrical / Instrumentation / Commissioning) under it. The FY split
+  // drops in when a fiscal-year field lands on the project master; until
+  // then this is the single section the sheet reads.
+  {
+    id: 'wip-finance',
+    title: 'Project WIP finance',
+    description:
+      'Per project and discipline: Budget, Commitment (PR / PO made), Actual (vendor advance + GRN posted) and Assigned (Actual + Committed + remaining order plan).',
+    registers: [
+      'cost_budgets',
+      'purchase_requirements',
+      'purchase_orders',
+      'advance_payments',
+      'goods_receipts',
+      'procurement_plan',
+    ],
+    needProjects: true,
+    sortKeys: [{ key: 'budget', label: 'Budget' }],
+    columns: [
+      { key: 'row', label: 'Project / Discipline' },
+      { key: 'budget', label: 'Budget', align: 'right', total: 'All' },
+      { key: 'committed', label: 'Commitment', align: 'right', total: '' },
+      { key: 'actual', label: 'Actual', align: 'right', total: '' },
+      { key: 'assigned', label: 'Assigned', align: 'right', total: '' },
+    ],
+    summary: (data, ctx) => {
+      const pr = data.purchase_requirements ?? [];
+      const po = data.purchase_orders ?? [];
+      const adv = data.advance_payments ?? [];
+      const grn = data.goods_receipts ?? [];
+      const plan = data.procurement_plan ?? [];
+      const committed = sumField(pr, 'value') + sumField(po, 'value');
+      const actual = sumField(adv, 'amount') + sumField(grn, 'amount');
+      const remaining = plan
+        .filter((r) => str(r.data.status) === 'Planned')
+        .reduce((a, r) => a + num(r.data.value), 0);
+      const assigned = actual + committed + remaining;
+      const budget = (ctx?.projects ?? []).reduce((a, p) => a + num(p.budget), 0);
+      return [
+        { label: 'Budget (masters)', value: `₹${lakh(budget)}L` },
+        { label: 'Commitment', value: `₹${lakh(committed)}L`, tone: committed > 0 ? 'warn' : 'mute' },
+        { label: 'Actual', value: `₹${lakh(actual)}L` },
+        { label: 'Remaining order plan', value: `₹${lakh(remaining)}L` },
+        { label: 'Assigned', value: `₹${lakh(assigned)}L`, tone: assigned > 0 ? 'info' : 'mute' },
+      ];
+    },
+    rows: (data, ctx) => {
+      const DISCIPLINES = ['Process', 'Civil', 'Mechanical', 'Electrical', 'Instrumentation', 'Commissioning'];
+      // cost_budgets categories map onto the template's six words; Piping
+      // and Overheads have no discipline row, so they sit on the project
+      // header (the "rest" of the budget), never double-counted below.
+      const CATEGORY_TO_DISCIPLINE: Record<string, string> = {
+        Civil: 'Civil',
+        'Structural steel': 'Mechanical',
+        'Mechanical erection': 'Mechanical',
+        Electrical: 'Electrical',
+        Instrumentation: 'Instrumentation',
+        Commissioning: 'Commissioning',
+      };
+
+      const projects = ctx?.projects ?? [];
+      const budgets = data.cost_budgets ?? [];
+      const pr = data.purchase_requirements ?? [];
+      const po = data.purchase_orders ?? [];
+      const adv = data.advance_payments ?? [];
+      const grn = data.goods_receipts ?? [];
+      const plan = data.procurement_plan ?? [];
+
+      const pick = <T extends { projectId: string | null }>(rows: T[], id: string) =>
+        rows.filter((r) => r.projectId === id);
+      const byDisc = (rows: RecordRow[], id: string, field: string, discipline: string) =>
+        pick(rows, id)
+          .filter((r) => str(r.data.discipline) === discipline)
+          .reduce((a, r) => a + num(r[field]), 0);
+      const discOf = (row: RecordRow): string => {
+        const d = str(row.data.discipline);
+        return DISCIPLINES.includes(d) ? d : '';
+      };
+
+      const projectsWithSpend = new Set([
+        ...pr.map((r) => r.projectId),
+        ...po.map((r) => r.projectId),
+        ...adv.map((r) => r.projectId),
+        ...grn.map((r) => r.projectId),
+        ...plan.map((r) => r.projectId),
+        ...budgets.map((r) => r.projectId),
+      ]);
+      const ids = [...new Set([
+        ...projects.map((p) => p.id),
+        ...projectsWithSpend,
+      ])].filter(Boolean) as string[];
+
+      const out: React.ReactNode[][] = [];
+      const money = (v: number, k: string, dashForZero = true) => (
+        <span key={k} className="num">{v > 0 ? lakh(v) : dashForZero ? '—' : '0'}</span>
+      );
+
+      for (const id of ids) {
+        const p = projects.find((x) => x.id === id);
+        const pBudget = p ? num(p.budget) : 0;
+        const pCommitted = sumField(pick(pr, id), 'value') + sumField(pick(po, id), 'value');
+        const pActual = sumField(pick(adv, id), 'amount') + sumField(pick(grn, id), 'amount');
+        const pRemaining = pick(plan, id)
+          .filter((r) => str(r.data.status) === 'Planned')
+          .reduce((a, r) => a + num(r.data.value), 0);
+        const pAssigned = pActual + pCommitted + pRemaining;
+
+        // Project header row: the master budget, totals across every
+        // discipline, red when the assignment crosses the budget.
+        out.push([
+          <span key="p" style={{ fontWeight: 600 }}>{p?.name ?? id}</span>,
+          <span key="pb" className="num">{pBudget > 0 ? lakh(pBudget) : '—'}</span>,
+          <span key="pc" className="num">{lakh(pCommitted)}</span>,
+          <span key="pa" className="num">{lakh(pActual)}</span>,
+          <span key="pas" className="num" style={{ color: pAssigned > pBudget && pBudget > 0 ? 'var(--red)' : undefined }}>
+            {lakh(pAssigned)}
+          </span>,
+        ]);
+
+        for (const d of DISCIPLINES) {
+          const dBudget = pick(budgets, id)
+            .filter((r) => CATEGORY_TO_DISCIPLINE[str(r.data.category)] === d)
+            .reduce((a, r) => a + num(r.data.budget), 0);
+          const dCommitted = byDisc(pr, id, 'value', d) + byDisc(po, id, 'value', d);
+          const dActual = byDisc(adv, id, 'amount', d) + byDisc(grn, id, 'amount', d);
+          const dRemaining = pick(plan, id)
+            .filter((r) => str(r.data.status) === 'Planned' && discOf(r) === d)
+            .reduce((a, r) => a + num(r.data.value), 0);
+          const dAssigned = dActual + dCommitted + dRemaining;
+          // The client sheet prints all six discipline rows; a row with no
+          // figures reads 0 in the derived columns and — in the budget.
+          out.push([
+            <span key="d" className="text-[12px]" style={{ color: 'var(--muted)', paddingLeft: 14 }}>{d}</span>,
+            money(dBudget, 'db'),
+            money(dCommitted, 'dc', false),
+            money(dActual, 'da', false),
+            money(dAssigned, 'das', false),
+          ]);
+        }
+      }
+
+      // Sheet total under every project block, like the client's Σ row.
+      const committedAll = sumField(pr, 'value') + sumField(po, 'value');
+      const actualAll = sumField(adv, 'amount') + sumField(grn, 'amount');
+      const remainingAll = plan
+        .filter((r) => str(r.data.status) === 'Planned')
+        .reduce((a, r) => a + num(r.data.value), 0);
+      const budgetAll = projects.reduce((a, p) => a + num(p.budget), 0);
+      out.push([
+        <span key="tp" style={{ color: 'var(--muted)', fontWeight: 600 }}>All projects</span>,
+        <span key="tb" className="num" style={{ color: 'var(--muted)' }}>{lakh(budgetAll)}</span>,
+        <span key="tc" className="num" style={{ color: 'var(--muted)' }}>{lakh(committedAll)}</span>,
+        <span key="ta" className="num" style={{ color: 'var(--muted)' }}>{lakh(actualAll)}</span>,
+        <span key="tas" className="num" style={{ color: 'var(--muted)' }}>{lakh(actualAll + committedAll + remainingAll)}</span>,
+      ]);
+      return out;
     },
   },
 ];

@@ -9,6 +9,7 @@ import { ImportExcelModal } from '@/components/ImportExcelModal';
 import { useProjectData } from '@/lib/project-data';
 import { useSession } from '@/app/session';
 import { records, projects, admin, approvals, type ProjectOption, type RecordApprovalSummary, type RecordApprovalState } from '@/lib/services';
+import { deriveFromPlannerRows, L1Milestone } from '@/lib/planner/milestones';
 import { APPROVED_STATUS_WORDS, CHAIN_REGISTER_KEYS, PRE_CHAIN_WORDS } from '@/lib/row-approvals';
 import type { RecordRow, RecordType } from '@/lib/types';
 import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
@@ -47,7 +48,7 @@ export default function RegisterBody() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
 
-  const { loading: sessionLoading } = useSession();
+  const { loading: sessionLoading, user: sessionUser } = useSession();
   const { current } = useProjectData();
 
   const [type, setType] = useState<RecordType | null>(null);
@@ -65,6 +66,11 @@ export default function RegisterBody() {
   const [clientFilter, setClientFilter] = useState('');
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [clientOptions, setClientOptions] = useState<Array<{ id: string; name: string }>>([]);
+  /** Saved L1 plans, live-derived into the macro milestone view. */
+  const [plannerRows, setPlannerRows] = useState<RecordRow[]>([]);
+  /** Variation register: issued material + the POs that price it. */
+  const [issueRows, setIssueRows] = useState<RecordRow[]>([]);
+  const [poRows, setPoRows] = useState<RecordRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -251,6 +257,140 @@ export default function RegisterBody() {
     void load();
   }, [load]);
 
+  // Client: the schedule-milestone screen must reflect the L1 (macro) plan
+  // derived from planning & tasks. When this is that register, pull the
+  // project's saved L1 plans and derive the macro milestones live.
+  const isScheduleMilestones = key === 'schedule_milestones';
+  const l1ProjectId = projectId || current?.id || '';
+  useEffect(() => {
+    if (!isScheduleMilestones || !l1ProjectId) {
+      setPlannerRows([]);
+      return;
+    }
+    let cancelled = false;
+    records
+      .list('project_planner', { projectId: l1ProjectId, limit: 50 })
+      .then((page) => { if (!cancelled) setPlannerRows(page.items); })
+      .catch(() => { if (!cancelled) setPlannerRows([]); });
+    return () => { cancelled = true; };
+  }, [isScheduleMilestones, l1ProjectId]);
+
+  const l1Milestones: L1Milestone[] = useMemo(
+    () => (isScheduleMilestones ? deriveFromPlannerRows(plannerRows) : []),
+    [isScheduleMilestones, plannerRows],
+  );
+
+  // Client: on the Variations register the "Value" column must reflect
+  // consumption — material actually issued to the site (material_issue,
+  // status Issued) per activity, priced at the PO rate (raise_po value ÷
+  // qty) of the PO the item came through. No cost sits on the issue or GRN
+  // rows themselves, so the value is derived live, not stored.
+  const isVariation = key === 'variation';
+  // Client DCI spec cols 12–14: variance and the alert colour are derived
+  // live from the planned / actual submission pair and the row status —
+  // red when past the plan with no actual, orange within 3 days of it,
+  // green on track, blue once approved. Nothing is stored for them.
+  const isDci = key === 'dci_documents';
+  function dciDerived(data: Record<string, unknown>): {
+    variance: string;
+    alert: string;
+    tone: 'ok' | 'warn' | 'bad' | 'info' | 'mute';
+  } {
+    const status = String(data.status ?? '').trim().toLowerCase();
+    const planned = String(data.plannedSubmission ?? '').trim();
+    const actual = String(data.actualSubmission ?? '').trim();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const parseDay = (v: string) => (v ? new Date(`${v}T00:00:00`) : null);
+    let variance = '—';
+    const actualD = parseDay(actual);
+    const plannedD = parseDay(planned);
+    if (actualD && plannedD && !Number.isNaN(actualD.getTime()) && !Number.isNaN(plannedD.getTime())) {
+      const days = Math.round((actualD.getTime() - plannedD.getTime()) / 86_400_000);
+      variance = days === 0 ? '0' : `${days > 0 ? '+' : ''}${days}`;
+    }
+    if (/^(approved|ifc|afc)$/.test(status)) {
+      return { variance, alert: 'Approved', tone: 'info' };
+    }
+    const p = parseDay(planned);
+    if (actual === '' && p && !Number.isNaN(p.getTime())) {
+      const daysLeft = Math.round((p.getTime() - today.getTime()) / 86_400_000);
+      if (daysLeft < 0) {
+        return { variance, alert: 'Overdue', tone: 'bad' };
+      }
+      if (daysLeft <= 3) {
+        return { variance, alert: 'Due', tone: 'warn' };
+      }
+      return { variance, alert: 'On track', tone: 'ok' };
+    }
+    return { variance, alert: 'On track', tone: 'ok' };
+  }
+  useEffect(() => {
+    if (!isVariation || !l1ProjectId) {
+      setIssueRows([]);
+      setPoRows([]);
+      return;
+    }
+    let cancelled = false;
+    void Promise.all([
+      records.list('material_issue', { projectId: l1ProjectId, limit: 500 }),
+      records.list('raise_po', { projectId: l1ProjectId, limit: 500 }),
+    ])
+      .then(([issues, pos]) => {
+        if (cancelled) return;
+        setIssueRows(issues.items);
+        setPoRows(pos.items);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setIssueRows([]);
+        setPoRows([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isVariation, l1ProjectId]);
+
+  const norm = (s: string): string => s.trim().toLowerCase();
+  const consumptionValue = useMemo((): { wbs: string; value: number; basis: string }[] => {
+    if (!isVariation) return [];
+    // Rate per item: PO value (₹L) ÷ PO qty, from the freshest PO naming
+    // that item (items priced on more than one PO bill at the latest rate).
+    const rates = new Map<string, { rate: number; poNo: string }>();
+    const poByNo = new Map<string, { rate: number; poNo: string }>();
+    for (const po of poRows) {
+      const item = String(po.data.item ?? '').trim();
+      const poNo = String(po.data.poNo ?? '').trim();
+      const qty = Number(po.data.quantity ?? 0);
+      const value = Number(po.data.value ?? 0);
+      if (!(qty > 0) || !(value > 0)) continue;
+      const r = { rate: value / qty, poNo };
+      if (poNo) poByNo.set(norm(poNo), r);
+      if (item) rates.set(norm(item), r);
+    }
+    const byWbs = new Map<string, { value: number; basis: string[] }>();
+    for (const mi of issueRows) {
+      if (String(mi.data.status ?? '') !== 'Issued') continue;
+      const item = String(mi.data.item ?? '').trim();
+      const qty = Number(mi.data.quantity ?? 0);
+      const wbs = String(mi.data.activity ?? '').trim();
+      if (!(qty > 0) || !wbs) continue;
+      // Prefer the issue row's own PO reference (the new poRef select) over
+      // a fuzzy item-name match; the name match stays for pre-poRef rows.
+      const r = (mi.data.poRef ? poByNo.get(norm(String(mi.data.poRef))) : undefined) ?? rates.get(norm(item));
+      if (!r) continue;
+      const cur = byWbs.get(norm(wbs)) ?? { value: 0, basis: [] };
+      cur.value += qty * r.rate;
+      cur.basis.push(`${qty} ${item} @ ${r.poNo || 'PO'} (${(r.rate).toLocaleString('en-IN', { maximumFractionDigits: 2 })}₹L/u)`);
+      byWbs.set(norm(wbs), cur);
+    }
+    return [...byWbs.entries()].map(([wbs, c]) => ({
+      wbs,
+      value: c.value,
+      basis: c.basis.join('; '),
+    }));
+  }, [isVariation, issueRows, poRows]);
+
   useEffect(() => {
     setStatusFilter('');
     setItemTypeFilter('');
@@ -317,8 +457,13 @@ export default function RegisterBody() {
   ]);
 
   // Frozen: the live chain approved it, or the row's own word says it is
-  // settled (same rule the backend enforces on update).
+  // settled (same rule the backend enforces on update). Client DSR log
+  // (item 5): a DSR row the chain approved is frozen for everyone except
+  // the project manager, who keeps the correction path — the same exception
+  // the backend's update guard applies.
+  const dsrPmOverride = key === 'dsr_entries' && sessionUser?.role === 'projectmanager';
   function rowFrozen(r: RecordRow): boolean {
+    if (dsrPmOverride) return false;
     const s = approvalStates[r.ref];
     if (s?.status === 'approved') return true;
     const word = String(r.data.status ?? '');
@@ -338,16 +483,21 @@ export default function RegisterBody() {
     const hasChain = approvalStates[r.ref] !== undefined;
     const frozen = rowFrozen(r);
     const preChain = word === '' || PRE_CHAIN_WORDS.has(word);
+    // Compact, single-line buttons: the Actions column is narrow and the
+    // previous min-width + default sizing let "Send for approval" wrap onto
+    // two lines and break the row height. `small` + no-wrap keep every row
+    // the same height and every label readable on one line.
+    const act = 'small whitespace-nowrap';
     return (
-      <span key="act" className="flex justify-end gap-2">
-        {!frozen ? <Button variant="primary" className="min-w-[90px] justify-center" onClick={() => setEditing(r)}>Edit</Button> : null}
+      <span key="act" className="flex flex-wrap items-center justify-end gap-1.5">
+        {!frozen ? <Button variant="primary" className={act} onClick={() => setEditing(r)}>Edit</Button> : null}
         {frozen || hasChain ? (
-          <Button variant="primary" className="min-w-[90px] justify-center" disabled={detailBusy} onClick={() => void openDetail(r.ref)}>
+          <Button variant="primary" className={act} disabled={detailBusy} onClick={() => void openDetail(r.ref)}>
             Details
           </Button>
         ) : null}
         {isChainRegister && !NO_SEND_KEYS.has(key) && statesKnown && !hasChain && !frozen && preChain ? (
-          <Button variant="primary" className="min-w-[90px] justify-center" disabled={sendBusyRef === r.ref} onClick={() => void sendForApproval(r)}>
+          <Button variant="primary" className={act} disabled={sendBusyRef === r.ref} onClick={() => void sendForApproval(r)}>
             {sendBusyRef === r.ref ? 'Sending…' : 'Send for approval'}
           </Button>
         ) : null}
@@ -465,6 +615,52 @@ export default function RegisterBody() {
         </div>
       </Panel>
 
+      {l1Milestones.length > 0 ? (
+        <Panel
+          title="L1 schedule (macro view)"
+          sub={`Derived from the project's ${l1ProjectId ? 'L1 planning schedule' : 'plan'} · ${l1Milestones.length} top-level phase${l1Milestones.length === 1 ? '' : 's'}`}
+          bodyless
+        >
+          <DataTable
+            columns={[
+              { key: 'm', label: 'Milestone (L1 phase)' },
+              { key: 'pl', label: 'Planned' },
+              { key: 'fc', label: 'Forecast' },
+              { key: 'pr', label: 'Progress' },
+              { key: 'st', label: 'Status', align: 'right' as const },
+            ]}
+            rows={l1Milestones.map((m) => [
+              m.name,
+              m.planned,
+              m.forecast ?? '—',
+              `${m.progress}%`,
+              m.status,
+            ])}
+          />
+        </Panel>
+      ) : null}
+
+      {isVariation && consumptionValue.length > 0 ? (
+        <Panel
+          title="Consumption value (derived)"
+          sub="Material issued to the site per activity, priced at the PO rate — the source the Variation value reflects"
+          bodyless
+        >
+          <DataTable
+            columns={[
+              { key: 'w', label: 'Activity / WBS' },
+              { key: 'v', label: 'Value (₹L)', align: 'right' as const },
+              { key: 'b', label: 'Basis (issued qty @ PO rate)' },
+            ]}
+            rows={consumptionValue.map((c) => [
+              c.wbs,
+              c.value.toLocaleString('en-IN', { maximumFractionDigits: 2 }),
+              <span key="b" className="text-[12px] opacity-70">{c.basis}</span>,
+            ])}
+          />
+        </Panel>
+      ) : null}
+
       <Panel title="Records" bodyless>
         <DataTable
           columns={
@@ -472,6 +668,15 @@ export default function RegisterBody() {
               ...(columns.length > 0
                 ? columns
                 : [{ key: titleField, label: type?.label ?? 'Record' }]),
+              ...(isVariation
+                ? [{ key: '__consumption', label: 'Consumption value (₹L)', align: 'right' as const }]
+                : []),
+              ...(isDci
+                ? [
+                  { key: '__variance', label: 'Variance (days)', align: 'right' as const },
+                  { key: '__alert', label: 'Alert', align: 'right' as const },
+                ]
+                : []),
               ...(isChainRegister
                 ? [
                   { key: '__actions', label: 'Actions', align: 'right' as const },
@@ -484,12 +689,34 @@ export default function RegisterBody() {
               ? [
                 [
                   ...(columns.length > 0 ? columns : [{ key: titleField, label: '', align: undefined as string | undefined, type: undefined as string | undefined }]).map(() => '—'),
+                  ...(isDci ? ['—', '—'] : []),
                   ...(isChainRegister ? ['—'] : []),
                 ],
               ]
               : filteredRows.map((r) =>
                 [
                   ...(columns.length > 0 ? columns : [{ key: titleField, label: '', align: undefined as string | undefined, type: undefined as string | undefined }]).map((c) => {
+                    // The live consumption column: the derived value of the
+                    // activity this variation row names, not the entered one.
+                    if (c.key === '__consumption') {
+                      const wbs = String(r.data.wbsRef ?? '').trim();
+                      const hit = consumptionValue.find((cv) => norm(cv.wbs) === norm(wbs));
+                      return hit
+                        ? hit.value.toLocaleString('en-IN', { maximumFractionDigits: 2 })
+                        : '—';
+                    }
+                    // Client DCI spec cols 14 + 1: the derived variance day
+                    // count and the colour-coded alert word, computed from
+                    // the row's planned / actual submission pair.
+                    if (c.key === '__variance' || c.key === '__alert') {
+                      const d = dciDerived(r.data as Record<string, unknown>);
+                      if (c.key === '__variance') return d.variance;
+                      return (
+                        <Chip key={c.key} tone={d.tone}>
+                          {d.alert}
+                        </Chip>
+                      );
+                    }
                     const value = r.data[c.key];
                     if (value === undefined || value === null || value === '') return '—';
                     if (typeof value === 'number') return value.toLocaleString();
@@ -511,10 +738,38 @@ export default function RegisterBody() {
                         </Chip>
                       );
                     }
+                    // Document columns: a `file` row holds one descriptor, a
+                    // `files` row (the DSR's site images) holds a batch.
+                    // Either reads as the links themselves, with a count when
+                    // it is more than one.
+                    if (c.type === 'file' || c.type === 'files') {
+                      const raw = value as Array<{ url?: string; name?: string }> | { url?: string; name?: string } | string;
+                      const items = (Array.isArray(raw) ? raw : raw ? [raw] : []).filter(
+                        (d) => d && typeof d === 'object' && typeof d.url === 'string' && d.url !== '',
+                      );
+                      if (items.length === 0) return '—';
+                      return (
+                        <span key={c.key} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px]">
+                          {items.map((d, i) => (
+                            <a
+                              key={`${i}-${d.url}`}
+                              href={d.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="underline"
+                              style={{ color: 'var(--accent)' }}
+                            >
+                              {d.name || 'document'}
+                            </a>
+                          ))}
+                          {items.length > 1 ? <span className="opacity-60">×{items.length}</span> : null}
+                        </span>
+                      );
+                    }
                     return String(value);
                   }),
                   ...(isChainRegister
-                    ? [<span key="act" className="flex justify-end">{actionCell(r)}</span>]
+                    ? [actionCell(r)]
                     : []),
                 ],
               )

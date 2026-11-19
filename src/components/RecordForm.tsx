@@ -31,18 +31,34 @@ interface RecordFormProps {
    * null, on top of each field's declared default.
    */
   initialValues?: Record<string, unknown>;
+  /**
+   * Field keys to leave off this form (the BOQ desk's item form hides the
+   * late-stage columns — ordered qty, vendor, PO reference — which belong
+   * to the RFQ / PO screens). Hidden fields still save: a value the form
+   * does not show writes back whatever the record already held.
+   */
+  excludeFields?: string[];
   onCancel: () => void;
   onSubmit: (body: Record<string, unknown>) => Promise<void>;
 }
 
-export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: RecordFormProps) {
+export function RecordForm({ type, record, initialValues, onCancel, onSubmit, excludeFields }: RecordFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [projectId, setProjectId] = useState<string>('');
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** Files chosen but not yet uploaded, keyed by field key. */
-  const [pending, setPending] = useState<Record<string, File>>({});
+  /**
+   * Files chosen but not yet uploaded, keyed by field key. A single-file
+   * pick holds one File; a multi-image field (the DSR's site photos) holds
+   * a File[] the picker appends to. Normalised on submit.
+   */
+  const [pending, setPending] = useState<Record<string, File | File[]>>({});
+  const pendingFilesFor = (key: string): File[] => {
+    const p = pending[key];
+    if (!p) return [];
+    return Array.isArray(p) ? p : [p];
+  };
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
   /** Live select options, keyed by the source register key a field pulls from. */
   const [liveOptions, setLiveOptions] = useState<Record<string, string[]>>({});
@@ -54,7 +70,15 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
    */
   const [liveRows, setLiveRows] = useState<Record<string, Array<{ title: string; data: Record<string, unknown> }>>>({});
 
-  const fields = [...type.fields].sort((a, b) => a.sortOrder - b.sortOrder);
+  // excludeFields: the BOQ desk hides the late-stage columns (ordered qty,
+  // vendor, PO reference) from the indent-stage item form. On an edit the
+  // values state is seeded from record.data, so hidden keys still ride in
+  // the payload untouched; on a create they are simply absent and the
+  // backend fills each field's empty value.
+  const hidden = new Set(excludeFields ?? []);
+  const fields = [...type.fields]
+    .filter((f) => !hidden.has(f.key))
+    .sort((a, b) => a.sortOrder - b.sortOrder);
 
   // Fields that declare optionsFrom (e.g. the GRN vendor list follows the
   // Vendor master) load their options live: one register fetch per source,
@@ -216,8 +240,10 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
 
     // Upload any pending files before saving the row. A pending upload means
     // the user picked a file in this form; resolving it first means the saved
-    // row always points at a real document.
-    const fileFields = fields.filter((f) => f.type === 'file');
+    // row always points at a real document. `files` fields hold a whole
+    // batch (the DSR's site photos); a new pick appends to the batch already
+    // on the row, it never replaces the photos the report carried.
+    const fileFields = fields.filter((f) => f.type === 'file' || f.type === 'files');
     const toUpload = fileFields.filter((f) => pending[f.key] !== undefined);
 
     setBusy(true);
@@ -228,13 +254,25 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
 
       for (const f of toUpload) {
         setUploadingKey(f.key);
-        const file = pending[f.key];
-        if (!file) continue;
-        const descriptor = await uploadService.upload(
-          file,
-          `${type.permissionModule}:create`,
-        );
-        resolved[f.key] = descriptor;
+        const picked = pendingFilesFor(f.key);
+        const descriptors: Array<{ url: string; name: string; size: number; mimetype: string }> = [];
+        for (const file of picked) {
+          const descriptor = await uploadService.upload(
+            file,
+            `${type.permissionModule}:create`,
+          );
+          descriptors.push(descriptor);
+        }
+        if (f.type === 'files') {
+          const prev = Array.isArray(resolved[f.key])
+            ? (resolved[f.key] as Array<{ url?: string; name?: string; size?: number; mimetype?: string }>)
+            : resolved[f.key]
+              ? [resolved[f.key]]
+              : [];
+          resolved[f.key] = [...prev, ...descriptors];
+        } else {
+          resolved[f.key] = descriptors[0] ?? null;
+        }
       }
       setUploadingKey(null);
 
@@ -310,20 +348,58 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
             </Field>
           ) : null}
 
-          {fields.map((f) => (
+          {fields.map((f) => {
+            // Create-only options: the DSR add form offers a single entry
+            // word ("Submit for approval") that the backend rewrites to the
+            // stored default on save; the edit form and the chips keep the
+            // full set.
+            const shown =
+              !record && f.createOptions && f.createOptions.length > 0 && !f.optionsFrom
+                ? { ...f, options: f.createOptions }
+                : f;
+            // Linked dropdown (the DSR sub-task picker): when a select is fed
+            // from a register, its list can be narrowed to the rows whose
+            // matchField equals the sibling field's chosen value read through
+            // sourceKey. The sibling holds the picked title; find that title's
+            // source row, read the code it carries, keep only the sub rows
+            // whose parent points at it.
+            const liveRowsForField = f.optionsFrom ? liveRows[f.optionsFrom] ?? [] : [];
+            const liveOptsForField = f.optionsFrom ? liveOptions[f.optionsFrom] ?? [] : [];
+            let filteredOptions: string[] | null = null;
+            if (f.optionsFrom && f.optionsFromFilter) {
+              const { fromField, matchField, sourceKey } = f.optionsFromFilter;
+              const siblingValue = String(values[fromField] ?? '');
+              const sourceRow = sourceKey
+                ? liveRowsForField.find((r) => r.title === siblingValue)
+                : undefined;
+              const codeMatch = sourceKey && sourceRow ? String(sourceRow.data[sourceKey] ?? '') : siblingValue;
+              filteredOptions = liveRowsForField
+                .filter((r) => String(r.data[matchField] ?? '') === codeMatch)
+                .map((r) => r.title);
+            }
+            const mergedOptions = f.optionsFrom
+              ? filteredOptions !== null
+                ? [...new Set([...filteredOptions, ...f.options])]
+                : [...new Set([...liveOptsForField, ...f.options])]
+              : shown.options;
+            return (
             <Field key={f.key} label={f.label} required={f.required}>
               <Input
-                field={
-                  f.optionsFrom
-                    ? { ...f, options: [...new Set([...(liveOptions[f.optionsFrom] ?? []), ...f.options])] }
-                    : f
-                }
+                field={{ ...shown, options: mergedOptions }}
                 value={values[f.key]}
                 onChange={(v) => {
                   set(f.key, v);
+                  // Linked dropdown: changing the main task orphans the sub
+                  // task picked against the old one, so clear every field
+                  // whose options are filtered off this field's value.
+                  for (const dep of fields) {
+                    if (dep.optionsFromFilter && dep.optionsFromFilter.fromField === f.key) {
+                      if (values[dep.key] !== undefined && values[dep.key] !== '') set(dep.key, '');
+                    }
+                  }
                   // optionsFromDetail: picking the PO reflects its item and
                   // quantity onto the receipt so the GRN reads what the PO
-                  // bought, no re-typing. A free-typed value reflects nothing.
+                  // bought, no re-typing.
                   if (f.optionsFrom && f.optionsFromDetail && typeof v === 'string' && v) {
                     const hit = (liveRows[f.optionsFrom] ?? []).find((r) => r.title === v);
                     if (hit) {
@@ -335,12 +411,45 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit }: 
                   }
                 }}
                 pending={pending[f.key]}
-                onPick={(file) => setPending((p) => ({ ...p, [f.key]: file }))}
+                onPick={(picked) => {
+                  // A `files` field appends to the batch already picked; a
+                  // single-file field replaces its pick.
+                  setPending((prev) => {
+                    const existing = prev[f.key];
+                    if (f.type === 'files' && (Array.isArray(existing) || picked)) {
+                      const list = Array.isArray(existing) ? existing : existing ? [existing] : [];
+                      const isDup = list.some((x) => x.name === picked.name && x.size === picked.size);
+                      return { ...prev, [f.key]: isDup ? list : [...list, picked] };
+                    }
+                    return { ...prev, [f.key]: picked };
+                  });
+                }}
+                onPickMany={(pickedMany) => {
+                  // The batch picker (the DSR's site photos) adds a whole
+                  // selection at once, de-duped by name + size.
+                  setPending((prev) => {
+                    const existing = prev[f.key];
+                    const list = Array.isArray(existing) ? existing : existing ? [existing] : [];
+                    const merged = [...list];
+                    for (const p of pickedMany) {
+                      if (!merged.some((x) => x.name === p.name && x.size === p.size)) merged.push(p);
+                    }
+                    return { ...prev, [f.key]: merged };
+                  });
+                }}
+                onRemoveFile={(index) => {
+                  setPending((prev) => {
+                    const list = prev[f.key];
+                    if (!Array.isArray(list)) return prev;
+                    return { ...prev, [f.key]: list.filter((_, i) => i !== index) };
+                  });
+                }}
                 onClear={() => clearField(f.key)}
                 uploading={uploadingKey === f.key}
               />
             </Field>
-          ))}
+            );
+          })}
         </div>
 
         <footer
@@ -388,19 +497,35 @@ interface InputProps {
   field: RecordField;
   value: unknown;
   onChange: (value: unknown) => void;
-  /** A File chosen in this session but not yet uploaded. */
-  pending?: File;
-  /** True while this field's file is being uploaded on submit. */
+  /** Files chosen in this session but not yet uploaded: one for a `file`
+   * field, a batch for a `files` field (the DSR's site photos). */
+  pending?: File | File[];
+  /** True while this field's files are being uploaded on submit. */
   uploading?: boolean;
   onPick: (file: File) => void;
+  /** Multi-file pick for a `files` field: a whole batch at once. */
+  onPickMany?: (files: File[]) => void;
+  /** Clears one pending pick by index (a `files` batch). */
+  onRemoveFile?: (index: number) => void;
   /** Clears a pending pick. Must also remove it from pending state, not just
    * set the value to null — a null value would still be shadowed by the
    * pending File and uploaded anyway. */
   onClear: () => void;
 }
 
-function Input({ field, value, onChange, pending, uploading, onPick, onClear }: InputProps) {
+function Input({
+  field,
+  value,
+  onChange,
+  pending,
+  uploading,
+  onPick,
+  onPickMany,
+  onRemoveFile,
+  onClear,
+}: InputProps) {
   const str = value === null || value === undefined ? '' : String(value);
+  const pendingFiles = pending ? (Array.isArray(pending) ? pending : [pending]) : [];
 
   switch (field.type) {
     case 'textarea':
@@ -491,6 +616,18 @@ function Input({ field, value, onChange, pending, uploading, onPick, onClear }: 
           uploading={uploading}
           onPick={onPick}
           onClear={onClear}
+          onChange={onChange}
+        />
+      );
+
+    case 'files':
+      return (
+        <FilesInput
+          value={value as Array<{ url?: string; name?: string }> | { url?: string; name?: string } | null}
+          pending={pendingFiles}
+          uploading={uploading}
+          onPickMany={onPickMany}
+          onRemoveFile={onRemoveFile}
           onChange={onChange}
         />
       );
@@ -613,6 +750,142 @@ function ComboSelect({
  * A newly chosen File renders with its name and a remove affordance; it is
  * uploaded on submit, not on selection.
  */
+/**
+ * A batch of documents / images for a `files` field. The DSR's site photos:
+ * the whole day's shots, not one. A picked batch lists its names and drops
+ * individually; saved descriptors render as links. A pending pick
+ * (this session's files) lists with sizes and removes on click.
+ */
+function FilesInput({
+  value,
+  pending,
+  uploading,
+  onPickMany,
+  onRemoveFile,
+  onChange,
+}: {
+  value: Array<{ url?: string; name?: string }> | { url?: string; name?: string } | null;
+  pending: File[];
+  uploading?: boolean;
+  onPickMany?: (files: File[]) => void;
+  onRemoveFile?: (index: number) => void;
+  onChange: (value: unknown) => void;
+}) {
+  const saved = Array.isArray(value)
+    ? value
+    : value && typeof value === 'object' && value.url
+      ? [value]
+      : [];
+
+  if (uploading) {
+    return (
+      <span className="inline-flex items-center gap-2 rounded px-2.5 py-1.5 text-[12.5px]" style={INPUT_STYLE}>
+        <span className="inline-block h-2.5 w-2.5 animate-pulse rounded-full" style={{ background: 'var(--accent)' }} />
+        Uploading {pending.length} file{pending.length === 1 ? '' : 's'}…
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {pending.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {pending.map((f, i) => (
+            <span
+              key={`${f.name}-${i}`}
+              className="inline-flex items-center gap-1.5 rounded px-2 py-1 text-[12px]"
+              style={{ border: '1px solid var(--line)', background: 'var(--panel-2, #f9faf8)' }}
+            >
+              <span className="truncate" style={{ maxWidth: 160 }}>{f.name}</span>
+              <span style={{ color: 'var(--muted)' }}>({humanSize(f.size)})</span>
+              <button
+                type="button"
+                onClick={() => onRemoveFile?.(i)}
+                className="ml-0.5 text-[14px] leading-none"
+                style={{ color: 'var(--muted)' }}
+                aria-label={`Remove ${f.name}`}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {saved.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
+          {saved.map((d, i) => (
+            <a
+              key={`${d.url}-${i}`}
+              href={d.url}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+            >
+              {d.name || 'Download'}
+            </a>
+          ))}
+          {pending.length === 0 ? (
+            <button
+              type="button"
+              onClick={() => onChange(null)}
+              className="rounded px-1.5 py-0.5 text-[12px]"
+              style={{ border: '1px solid var(--line)', color: 'var(--muted)' }}
+            >
+              Clear all
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      <label
+        className="flex w-full cursor-pointer items-center gap-3 rounded-md px-3.5 py-3"
+        style={{
+          border: '1.5px dashed var(--line)',
+          background: 'var(--panel-2, #f9faf8)',
+          transition: 'border-color 0.15s ease',
+        }}
+      >
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" className="flex-none" aria-hidden="true">
+          <path
+            d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"
+            stroke="var(--muted)"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M14 3v4a1 1 0 0 0 1 1h4"
+            stroke="var(--muted)"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        <span className="text-[12.5px]">
+          <span className="font-semibold" style={{ color: 'var(--ink)' }}>
+            Add site images
+          </span>
+          <span className="block text-[11.5px]" style={{ color: 'var(--muted)' }}>
+            Pick several at once · uploaded on save
+          </span>
+        </span>
+        <input
+          type="file"
+          multiple
+          accept="image/*"
+          className="sr-only"
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? []);
+            if (files.length > 0) onPickMany?.(files);
+            e.target.value = '';
+          }}
+        />
+      </label>
+    </div>
+  );
+}
+
 /**
  * Width of a picked image, measured from the File itself. Used for a
  * low-resolution warning: a WhatsApp-compressed photo (~700px wide) uploads
