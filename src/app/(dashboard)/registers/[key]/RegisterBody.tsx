@@ -65,6 +65,12 @@ export default function RegisterBody() {
   const [itemTypeFilter, setItemTypeFilter] = useState('');
   const [clientFilter, setClientFilter] = useState('');
   const [overdueOnly, setOverdueOnly] = useState(false);
+  /** WBS register only: the selected main task ('' = the whole tree). The
+   * table then shows only that node's branch, and the consumed column reads
+   * off the same branch. Candidates come from the loaded rows. */
+  const [wbsMainTask, setWbsMainTask] = useState('');
+  /** WBS register: the material issues that count as consumption. */
+  const [wbsIssueRows, setWbsIssueRows] = useState<RecordRow[]>([]);
   const [clientOptions, setClientOptions] = useState<Array<{ id: string; name: string }>>([]);
   /** Saved L1 plans, live-derived into the macro milestone view. */
   const [plannerRows, setPlannerRows] = useState<RecordRow[]>([]);
@@ -148,6 +154,9 @@ export default function RegisterBody() {
 
   const isClientApprovals = key === 'client_approvals';
   const isDpr = key === 'pm_daily_progress';
+  // Declared up top: the displayRows / wbsConsumed memos below read it, and
+  // a memo body runs at its hook site — before any later const initialises.
+  const isWbs = key === 'wbs_register';
 
   useEffect(() => {
     void projects.list().then(setProjectsOptions).catch(() => setProjectsOptions([]));
@@ -183,11 +192,64 @@ export default function RegisterBody() {
     })
     : rows;
 
+  // WBS register: pick a main task and every WBS code below it is what the
+  // screen shows — the node itself plus its whole branch, walked down the
+  // parentCode links. No pick = the full tree.
+  const displayRows = useMemo((): RecordRow[] => {
+    if (!isWbs || !wbsMainTask) return filteredRows;
+    // Local, not the component-level norm: that const is declared further
+    // down the render body, and a memo runs before it exists.
+    const n = (s: string): string => s.trim().toLowerCase();
+    const parentOf = new Map<string, string>();
+    for (const r of filteredRows) {
+      const c = String(r.data.wbsCode ?? '').trim();
+      if (c) parentOf.set(n(c), String(r.data.parentCode ?? '').trim());
+    }
+    const inBranch = (code: string, main: string): boolean => {
+      let cur = code;
+      for (let i = 0; i < 20; i += 1) {
+        if (cur === main) return true;
+        const up = parentOf.get(n(cur));
+        if (!up) return false;
+        cur = up;
+      }
+      return false;
+    };
+    const main = wbsMainTask;
+    return filteredRows.filter((r) => {
+      const c = String(r.data.wbsCode ?? '').trim();
+      if (!c) return true;
+      return c === main || inBranch(c, main);
+    });
+  }, [isWbs, wbsMainTask, filteredRows]);
+
+  // WBS register: the consumed quantity per WBS code, live-summed from the
+  // site material issues that name that code. The required quantity is the
+  // node's own "Quantity" field; the difference is the shortfall or the
+  // surplus the register should read at a glance.
+  const wbsConsumed = useMemo((): Map<string, number> => {
+    const map = new Map<string, number>();
+    if (!isWbs) return map;
+    // Local normaliser: the component-level `norm` const is declared further
+    // down the render body, so it is not initialised when this memo runs.
+    const n = (s: string): string => s.trim().toLowerCase();
+    for (const mi of wbsIssueRows) {
+      if (String(mi.data.status ?? '') !== 'Issued') continue;
+      const wbs = String(mi.data.activity ?? '').trim();
+      const qty = Number(mi.data.quantity ?? 0);
+      if (!wbs || !(qty > 0)) continue;
+      map.set(n(wbs), (map.get(n(wbs)) ?? 0) + qty);
+    }
+    return map;
+  }, [isWbs, wbsIssueRows]);
+
   function exportCsv(): void {
     if (!type) return;
     const fields = type.fields;
     const header = fields.map((f) => f.label).join(',');
-    const lines = filteredRows.map((r) =>
+    // Export the rows the screen shows: on the WBS register a main-task
+    // pick narrows the tree, so the CSV does too.
+    const lines = displayRows.map((r) =>
       fields
         .map((f) => {
           const v = r.data[f.key];
@@ -286,6 +348,33 @@ export default function RegisterBody() {
   // qty) of the PO the item came through. No cost sits on the issue or GRN
   // rows themselves, so the value is derived live, not stored.
   const isVariation = key === 'variation';
+  // WBS register: the "Consumed / required" cell. Required is the node's own
+  // "Quantity" field; consumed is the live sum of the site material issues
+  // naming this WBS code. The difference is read in colour — red when the
+  // site has used less than the requirement (still to come), green when it
+  // has passed it (surplus).
+  const wbsConsumedCell = (r: RecordRow): ReactNode => {
+    const code = String(r.data.wbsCode ?? '').trim();
+    const required = Number(r.data.quantity ?? 0);
+    const consumed = code ? (wbsConsumed.get(code.trim().toLowerCase()) ?? 0) : 0;
+    if (!required && !consumed) return '—';
+    const diff = consumed - required;
+    return (
+      <span key="wc" className="tabular-nums text-[12.5px]">
+        <span style={{ color: diff >= 0 ? 'var(--ok)' : 'var(--red)' }}>{consumed}</span>
+        <span className="opacity-60"> / {required}</span>
+        {required > 0 ? (
+          <span
+            className="ml-1.5"
+            style={{ color: diff >= 0 ? 'var(--ok)' : 'var(--red)' }}
+          >
+            {diff >= 0 ? `+${diff} surplus` : `${diff} short`}
+          </span>
+        ) : null}
+      </span>
+    );
+  };
+
   // Client DCI spec cols 12–14: variance and the alert colour are derived
   // live from the planned / actual submission pair and the row status —
   // red when past the plan with no actual, orange within 3 days of it,
@@ -351,7 +440,52 @@ export default function RegisterBody() {
     };
   }, [isVariation, l1ProjectId]);
 
+  // WBS register: the consumed quantity per WBS code is the live sum of the
+  // site material issues that name that code, so the register can compare
+  // it against the node's required quantity without storing a second number.
+  useEffect(() => {
+    if (!isWbs || !l1ProjectId) {
+      setWbsIssueRows([]);
+      return;
+    }
+    let cancelled = false;
+    records
+      .list('material_issue', { projectId: l1ProjectId, limit: 500 })
+      .then((res) => {
+        if (cancelled) return;
+        setWbsIssueRows(res.items);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setWbsIssueRows([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isWbs, l1ProjectId]);
+
   const norm = (s: string): string => s.trim().toLowerCase();
+  // WBS main-task candidates: the branch roots of the recorded tree — a
+  // node whose parentCode is empty, or points at a code that was never
+  // recorded itself. Those are the "main task" choices the register's
+  // filter offers.
+  const wbsMainTasks = useMemo((): string[] => {
+    if (!isWbs) return [];
+    const recorded = new Set(
+      rows.map((r) => String(r.data.wbsCode ?? '').trim()).filter((c) => c),
+    );
+    const recordedNorm = new Set([...recorded].map((c) => c.toLowerCase()));
+    const roots: string[] = [];
+    for (const r of rows) {
+      const code = String(r.data.wbsCode ?? '').trim();
+      if (!code) continue;
+      const parent = String(r.data.parentCode ?? '').trim();
+      // A branch root: no parent, or a parent code that was never recorded
+      // (e.g. WBS-00, the un-entered project node above the first level).
+      if (!parent || !recordedNorm.has(parent.toLowerCase())) roots.push(code);
+    }
+    return [...new Set(roots)].sort();
+  }, [isWbs, rows]);
   const consumptionValue = useMemo((): { wbs: string; value: number; basis: string }[] => {
     if (!isVariation) return [];
     // Rate per item: PO value (₹L) ÷ PO qty, from the freshest PO naming
@@ -396,7 +530,13 @@ export default function RegisterBody() {
     setItemTypeFilter('');
     setClientFilter('');
     setOverdueOnly(false);
+    setWbsMainTask('');
   }, [key]);
+
+  // A WBS main-task pick is only valid inside one project's tree.
+  useEffect(() => {
+    setWbsMainTask('');
+  }, [projectId]);
 
   const columns = useMemo(() => {
     if (!type) return [];
@@ -540,7 +680,7 @@ export default function RegisterBody() {
       <Panel
         title="Filter"
         bodyless
-        sub={loading ? 'Loading' : `${filteredRows.length} of ${total} record${total === 1 ? '' : 's'}`}
+        sub={loading ? 'Loading' : `${displayRows.length} of ${total} record${total === 1 ? '' : 's'}`}
       >
         <div className="grid gap-2 p-3 sm:grid-cols-2 lg:grid-cols-4">
           <input
@@ -564,6 +704,27 @@ export default function RegisterBody() {
               </option>
             ))}
           </select>
+          {isWbs ? (
+            // The WBS register is a hierarchy: the main-task picker narrows
+            // the codes to the chosen branch (the node and everything under
+            // it), the way a plan narrows to a workstream.
+            <select
+              value={wbsMainTask}
+              onChange={(e) => setWbsMainTask(e.target.value)}
+              className="rounded px-2.5 py-2 text-[13px] outline-none"
+              style={{ background: 'var(--panel-2)', border: '1px solid var(--line)', color: 'var(--ink)' }}
+            >
+              <option value="">All main tasks</option>
+              {wbsMainTasks.map((code) => {
+                const r = rows.find((x) => String(x.data.wbsCode ?? '').trim() === code);
+                return (
+                  <option key={code} value={code}>
+                    {code} — {String(r?.data.description ?? '').trim() || code}
+                  </option>
+                );
+              })}
+            </select>
+          ) : null}
           {isClientApprovals ? (
             <>
               <select
@@ -682,18 +843,24 @@ export default function RegisterBody() {
                   { key: '__actions', label: 'Actions', align: 'right' as const },
                 ]
                 : []),
+              ...(isWbs
+                ? [
+                  { key: '__wbsConsumed', label: 'Consumed / required', align: 'right' as const },
+                ]
+                : []),
             ]
           }
           rows={
-            filteredRows.length === 0
+            displayRows.length === 0
               ? [
                 [
                   ...(columns.length > 0 ? columns : [{ key: titleField, label: '', align: undefined as string | undefined, type: undefined as string | undefined }]).map(() => '—'),
                   ...(isDci ? ['—', '—'] : []),
                   ...(isChainRegister ? ['—'] : []),
+                  ...(isWbs ? ['—'] : []),
                 ],
               ]
-              : filteredRows.map((r) =>
+              : displayRows.map((r) =>
                 [
                   ...(columns.length > 0 ? columns : [{ key: titleField, label: '', align: undefined as string | undefined, type: undefined as string | undefined }]).map((c) => {
                     // The live consumption column: the derived value of the
@@ -732,9 +899,17 @@ export default function RegisterBody() {
                     // Status columns read as coloured chips, not raw words,
                     // so an approved row is green at a glance (the DSR look).
                     if (c.type === 'status') {
+                      const statusWord = String(value);
+                      // WBS register: an In-progress node also carries its
+                      // live % completion, so the row reads "In progress ·
+                      // 45%" — how far the work has moved, not just the word.
+                      const wbsPct = isWbs ? Number(r.data.progress ?? 0) : 0;
+                      const showWbsPct =
+                        isWbs && /in progress/i.test(statusWord) && wbsPct > 0;
                       return (
-                        <Chip key={c.key} tone={statusTone(String(value))}>
-                          {String(value)}
+                        <Chip key={c.key} tone={statusTone(statusWord)}>
+                          {statusWord}
+                          {showWbsPct ? ` · ${wbsPct}%` : ''}
                         </Chip>
                       );
                     }
@@ -774,6 +949,9 @@ export default function RegisterBody() {
                   }),
                   ...(isChainRegister
                     ? [actionCell(r)]
+                    : []),
+                  ...(isWbs
+                    ? [wbsConsumedCell(r)]
                     : []),
                 ],
               )

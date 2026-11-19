@@ -1264,8 +1264,11 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                   <th style={{ width: colW ? colW[8] : 140 }}>Actual finish</th>
                   <th style={{ width: colW ? colW[9] : 64 }}>% complete</th>
                   <th style={{ width: colW ? colW[10] : 58 }}>Delay</th>
-                  <th style={{ width: colW ? colW[11] : 120 }}>Remarks</th>
-                  <th style={{ width: 40 }} />
+                  <th style={{ width: colW ? colW[11] : 88 }}>Remarks</th>
+                  {/* Fixed layout honours this width: 40px clipped the
+                      move-up/down buttons. Four ~21px icons + padding
+                      need ~100px so ▲ ▼ + ✕ all sit on one row. */}
+                  <th style={{ width: 100 }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1338,7 +1341,13 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                           <span className="l1-actauto" title="Auto: earliest subtask actual start">{phaseAct!.start || '—'}</span>
                         ) : (
                           <input
-                            key={`L1as${t.id}:${t.as ?? ''}`}
+                            // Stable key: a value-bearing key (t.as) remounts
+                            // the input on every pick — upAct bumps rev, the
+                            // key changes, and the open native date picker is
+                            // torn down mid-navigation (click October, closed).
+                            // These inputs are controlled, so they never need
+                            // the remount-refresh the defaultValue siblings do.
+                            key={`L1as${t.id}`}
                             type="date"
                             value={t.as ?? ''}
                             onChange={(e) => upAct(t, 'as', e.target.value)}
@@ -1352,7 +1361,10 @@ export default function ProjectPlannerPage(): React.JSX.Element {
                           <span className="l1-actauto" title="Auto: latest subtask actual finish">{phaseAct!.finish || '—'}</span>
                         ) : (
                           <input
-                            key={`L1ae${t.id}:${t.ae ?? ''}`}
+                            // Same stable-key fix as the actual start input:
+                            // the controlled value updates in place, no
+                            // remount, the picker stays open across months.
+                            key={`L1ae${t.id}`}
                             type="date"
                             value={t.ae ?? ''}
                             onChange={(e) => upAct(t, 'ae', e.target.value)}
@@ -1541,8 +1553,27 @@ const PLANNER_CSS = `
    off screen (client: descriptions complete AND dates fully visible). */
 /* The table is wider than most screens, so .l1-scroll shows a horizontal
    scroller — Task description and the dates stay fully readable. */
-.planner-root .l1 table, .planner-root table.l1{border-collapse:collapse;width:100%;min-width:1400px;font-size:12.5px;color:#1e293b}
+/* A hard width matched to the sum of the declared column sizes (~1350px):
+   fixed layout keeps the declared sizes and the table stops at its content
+   width instead of stretching every column to the viewport — which used to
+   fatten the Remarks cell into a gap before the Actions icons. Keep the
+   width in step with the th values above; grow both if a column grows.
+   Narrow screens still scroll: the .l1-scroll wrapper owns the horizontal
+   scroll. */
+.planner-root .l1 table, .planner-root table.l1{border-collapse:collapse;width:1350px;font-size:12.5px;color:#1e293b;table-layout:fixed}
+.planner-root .l1 th,.planner-root .l1 td{overflow:hidden}
 .planner-root .l1 thead th{position:sticky;top:0;background:#c9a9d8;color:#1e1b4b;text-align:left;padding:6px 6px;font-size:12px;font-weight:700;z-index:3;border-bottom:1px solid #b795c9}
+/* Headers follow their data: the centred numeric / date / status cells
+   get a centred caption, the text columns keep the left edge. */
+.planner-root .l1 thead th:nth-child(3),
+.planner-root .l1 thead th:nth-child(5),
+.planner-root .l1 thead th:nth-child(6),
+.planner-root .l1 thead th:nth-child(7),
+.planner-root .l1 thead th:nth-child(8),
+.planner-root .l1 thead th:nth-child(9),
+.planner-root .l1 thead th:nth-child(10),
+.planner-root .l1 thead th:nth-child(11),
+.planner-root .l1 thead th:nth-child(13){text-align:center}
 .planner-root .l1 td{padding:4px 6px;border-bottom:1px solid #dbe4f0;white-space:nowrap}
 .planner-root .l1 td input{width:100%;border:1px solid transparent;background:transparent;padding:2px 4px;font-size:12.5px;color:#1e293b}
 .planner-root .l1 td input:hover,.planner-root .l1 td input:focus{border-color:#94a3b8;background:#fff;outline:none}
@@ -1554,6 +1585,8 @@ const PLANNER_CSS = `
 .planner-root .l1 tr.l1-task{background:#dbeafe}
 .planner-root .l1 tr.l1-task:hover td{background:#cfe0fb}
 .planner-root .l1-num b{font-size:12.5px}
+.planner-root .l1 td.l1-num{padding-left:20px}
+.planner-root .l1 thead th:nth-child(1){padding-left:20px}
 .planner-root .planner-tip{padding:10px 4px 4px;color:#475569;font-size:12px;line-height:1.6}
 .planner-root .planner-lg{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:4px}
 .planner-root .planner-lg span:before{content:"";display:inline-block;width:12px;height:8px;border-radius:2px;margin-right:5px;background:var(--c)}
