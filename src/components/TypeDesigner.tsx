@@ -42,6 +42,7 @@ const FIELD_TYPE_LABELS: Record<FieldType, string> = {
   boolean: 'Yes / No',
   table: 'Table',
   file: 'File',
+  files: 'Files (multiple)',
 };
 
 const REF_OPTIONS: RefTarget[] = ['project', 'user', 'client'];

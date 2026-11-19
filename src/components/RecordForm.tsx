@@ -612,7 +612,9 @@ function Input({
       return (
         <FileInput
           value={value as { name?: string; url?: string } | null}
-          pending={pending}
+          // pending is the raw union (single File or a File[]); a `file`
+          // field only ever holds one, so pass the normalized first element.
+          pending={pendingFiles[0]}
           uploading={uploading}
           onPick={onPick}
           onClear={onClear}

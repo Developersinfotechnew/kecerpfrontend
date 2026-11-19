@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { DataTable, Notice, Panel } from '@/components/ui';
 import { REPORT_LIMIT } from '@/lib/analytics';
-import { projects, records, type ProjectOption } from '@/lib/services';
+import { projects as projectsService, records, type ProjectOption } from '@/lib/services';
 import type { RecordRow } from '@/lib/types';
 import type { ReportDef, ReportContext } from '@/lib/report-definitions';
 
@@ -70,7 +70,9 @@ export function ReportRun({
       // A report that opted in with needProjects reads the live project
       // masters (budget, name) alongside the registers.
       if (report.needProjects) {
-        const masters = await projects.list({ kind: 'master' });
+        // `projects` is shadowed here by the state array below; call the
+        // aliased service so the master fetch resolves against the API.
+        const masters = await projectsService.list({ kind: 'master' });
         setProjects(masters);
       }
       setData(byKey);

@@ -857,7 +857,9 @@ export const REPORTS: ReportDef[] = [
       const byDisc = (rows: RecordRow[], id: string, field: string, discipline: string) =>
         pick(rows, id)
           .filter((r) => str(r.data.discipline) === discipline)
-          .reduce((a, r) => a + num(r[field]), 0);
+          // Row values live on r.data, not the row itself — r[field] would
+          // read undefined even if the index signature allowed it.
+          .reduce((a, r) => a + num(r.data[field]), 0);
       const discOf = (row: RecordRow): string => {
         const d = str(row.data.discipline);
         return DISCIPLINES.includes(d) ? d : '';
