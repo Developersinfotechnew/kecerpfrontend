@@ -744,8 +744,12 @@ export default function RegisterBody() {
                     // it is more than one.
                     if (c.type === 'file' || c.type === 'files') {
                       const raw = value as Array<{ url?: string; name?: string }> | { url?: string; name?: string } | string;
+                      // A type guard, not a plain predicate: the cell value
+                      // is a union (string | descriptor | descriptor[]), and
+                      // only a guard narrows the elements for the map below.
                       const items = (Array.isArray(raw) ? raw : raw ? [raw] : []).filter(
-                        (d) => d && typeof d === 'object' && typeof d.url === 'string' && d.url !== '',
+                        (d): d is { url: string; name?: string } =>
+                          d !== null && typeof d === 'object' && typeof d.url === 'string' && d.url !== '',
                       );
                       if (items.length === 0) return '—';
                       return (
