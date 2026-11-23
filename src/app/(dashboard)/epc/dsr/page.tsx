@@ -124,7 +124,7 @@ export default function EpcDsrPage() {
     <div>
       <PageHead
         title="Daily site reports"
-        sub={`${visible.length} of ${rows.length} entries`}
+        description={`${visible.length} of ${rows.length} entries`}
         actions={
           <div className="flex items-center gap-2">
             <input
