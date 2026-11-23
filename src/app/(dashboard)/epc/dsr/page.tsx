@@ -139,16 +139,19 @@ export default function EpcDsrPage() {
         }
       />
 
-      {error ? <Notice tone="bad">{error}</Notice> : null}
+      {error ? <Notice>{error}</Notice> : null}
 
-      <Panel>
-        <DataTable
-          columns={cols}
-          rows={rowsData}
-          loading={loading}
-          empty="No daily site reports yet."
-        />
-      </Panel>
+      {loading ? (
+        <div className="py-10 text-center text-[13px]" style={{ color: 'var(--muted)' }}>Loading…</div>
+      ) : (
+        <Panel>
+          <DataTable
+            columns={cols}
+            rows={rowsData}
+            empty="No daily site reports yet."
+          />
+        </Panel>
+      )}
 
       {formOpen && type ? (
         <RecordForm
