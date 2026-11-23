@@ -24,6 +24,15 @@ interface ImportExcelModalProps {
    * when absent or when a bulk call fails.
    */
   createBulk?: (rows: Record<string, unknown>[]) => Promise<void>;
+  /**
+   * The caller's own rules, run on each parsed row BEFORE it is validated.
+   * The BOQ import uses it to price an amount-only row (the sheet carries
+   * Amount, not Rate): the rate is derived from the qty and amount, so the
+   * imported line is priced the same as one typed on screen. Because it runs
+   * before validation it can satisfy a required field, and the preview shows
+   * what will actually be written. The value returned replaces the row's data.
+   */
+  prepare?: (data: Record<string, unknown>) => Record<string, unknown>;
   onClose: () => void;
   onImported: () => void;
 }
@@ -41,7 +50,7 @@ interface ImportExcelModalProps {
  * failed create stops the run at that row so the operator sees exactly what
  * broke. No row is ever silently dropped.
  */
-export function ImportExcelModal({ type, create, createBulk, onClose, onImported }: ImportExcelModalProps) {
+export function ImportExcelModal({ type, create, createBulk, prepare, onClose, onImported }: ImportExcelModalProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileName, setFileName] = useState('');
   const [rows, setRows] = useState<ParsedRow[]>([]);
@@ -116,7 +125,13 @@ export function ImportExcelModal({ type, create, createBulk, onClose, onImported
         }
         data[f.key] = coerce(f, raw);
       }
-      return { line: i + 2, data, error: rowError(fields, data) };
+      // The caller's own row rules run BEFORE validation, because they are what
+      // satisfies the required fields: a BOQ sheet carrying Amount but no Rate
+      // derives the rate here, and validation then sees a complete row. Running
+      // them after it rejected every amount-only sheet — the derived column
+      // never got the chance to fill the gap it fills on screen.
+      const prepared = prepare ? prepare(data) : data;
+      return { line: i + 2, data: prepared, error: rowError(fields, prepared) };
     });
 
     setRows(parsed);

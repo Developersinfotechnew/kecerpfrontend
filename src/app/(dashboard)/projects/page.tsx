@@ -435,6 +435,7 @@ function EditProjectModal({
       onSaved();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save project');
+    } finally {
       setBusy(false);
     }
   }
@@ -473,7 +474,7 @@ function EditProjectModal({
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={!busy}
+              disabled={busy}
               className={fieldInput}
               style={fieldStyle}
             />
@@ -482,7 +483,7 @@ function EditProjectModal({
             <input
               value={location}
               onChange={(e) => setLocation(e.target.value)}
-              disabled={!busy}
+              disabled={busy}
               className={fieldInput}
               style={fieldStyle}
             />
@@ -491,7 +492,7 @@ function EditProjectModal({
             <input
               value={technology}
               onChange={(e) => setTechnology(e.target.value)}
-              disabled={!busy}
+              disabled={busy}
               className={fieldInput}
               style={fieldStyle}
             />
@@ -502,7 +503,7 @@ function EditProjectModal({
               min="0"
               value={capacityTpd}
               onChange={(e) => setCapacityTpd(e.target.value)}
-              disabled={!busy}
+              disabled={busy}
               className={`${fieldInput} num`}
               style={fieldStyle}
             />
@@ -513,7 +514,7 @@ function EditProjectModal({
               min="0"
               value={contractValue}
               onChange={(e) => setContractValue(e.target.value)}
-              disabled={!busy}
+              disabled={busy}
               className={`${fieldInput} num`}
               style={fieldStyle}
             />
@@ -522,7 +523,7 @@ function EditProjectModal({
             <select
               value={health}
               onChange={(e) => setHealth(e.target.value as 'green' | 'amber' | 'red')}
-              disabled={!busy}
+              disabled={busy}
               className={fieldInput}
               style={fieldStyle}
             >
@@ -537,7 +538,7 @@ function EditProjectModal({
                 type="checkbox"
                 checked={clientApprovalsOn}
                 onChange={(e) => setClientApprovalsOn(e.target.checked)}
-                disabled={!busy}
+                disabled={busy}
                 className="h-4 w-4"
               />
               <span className="text-[12.5px]" style={{ color: 'var(--ink)' }}>
@@ -555,7 +556,7 @@ function EditProjectModal({
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
-              disabled={!busy}
+              disabled={busy}
               className={`${fieldInput} num`}
               style={fieldStyle}
             />
@@ -565,7 +566,7 @@ function EditProjectModal({
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
-              disabled={!busy}
+              disabled={busy}
               className={`${fieldInput} num`}
               style={fieldStyle}
             />

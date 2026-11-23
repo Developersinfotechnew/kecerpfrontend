@@ -371,7 +371,15 @@ export const admin = {
 
   async updateUser(
     id: string,
-    body: { name?: string; role?: string; isActive?: boolean; projectIds?: string[] },
+    body: {
+      name?: string;
+      email?: string;
+      role?: string;
+      isActive?: boolean;
+      projectIds?: string[];
+      /** Replacement password; the backend hashes it with bcrypt on write. */
+      password?: string;
+    },
   ): Promise<unknown> {
     return api(`/admin/users/${id}`, { method: 'PATCH', body });
   },

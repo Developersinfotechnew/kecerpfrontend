@@ -6,6 +6,7 @@ import { admin } from '@/lib/services';
 import type { NavEntryBody, NavEntryView, RoleBody, RoleOption, UserOption } from '@/lib/services';
 import { useSession } from '@/app/session';
 import { Button, Chip, DataTable, Notice, PageHead, Panel } from '@/components/ui';
+import { PasswordField } from '@/components/PasswordField';
 
 /**
  * Access admin — roles and the navigation catalogue.
@@ -34,6 +35,7 @@ export default function AccessAdminPage() {
   const [navForm, setNavForm] = useState<NavEntryView | 'new' | null>(null);
   const [users, setUsers] = useState<UserOption[]>([]);
   const [userForm, setUserForm] = useState(false);
+  const [editingUser, setEditingUser] = useState<UserOption | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -98,6 +100,26 @@ export default function AccessAdminPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Role assignment failed');
     }
+  }
+
+  /**
+   * Save an edit from the user table. Name, email, role and an optional new
+   * password go through the same PATCH the Users screen uses. Email is the
+   * login id, so the backend rejects one already taken.
+   */
+  async function saveUserEdit(
+    userId: string,
+    patch: { name: string; email: string; role: string; password?: string },
+  ): Promise<void> {
+    await admin.updateUser(userId, patch);
+    setUsers((prev) =>
+      prev.map((u) =>
+        u.id === userId
+          ? { ...u, name: patch.name, email: patch.email, role: patch.role }
+          : u,
+      ),
+    );
+    setEditingUser(null);
   }
 
   async function removeRole(role: RoleOption): Promise<void> {
@@ -214,6 +236,7 @@ export default function AccessAdminPage() {
             { key: 'email', label: 'Email' },
             { key: 'current', label: 'Current role' },
             { key: 'assign', label: 'Assign role', align: 'right' },
+            { key: 'x', label: '', align: 'right' },
           ]}
           empty="No users found. Create accounts from the developer panel, then assign roles here."
           rows={users.map((u): React.ReactNode[] => [
@@ -233,6 +256,17 @@ export default function AccessAdminPage() {
                 <option key={r.name} value={r.name}>{r.label}</option>
               ))}
             </select>,
+            <span key="x" className="flex items-center justify-end">
+              {canUpdate ? (
+                <Button
+                  variant="primary"
+                  className="min-w-[90px] justify-center"
+                  onClick={() => setEditingUser(u)}
+                >
+                  Edit
+                </Button>
+              ) : null}
+            </span>,
           ])}
         />
       </Panel>
@@ -306,6 +340,16 @@ export default function AccessAdminPage() {
         />
       ) : null}
 
+      {editingUser ? (
+        <UserEditDialog
+          user={editingUser}
+          roles={roles}
+          canSave={canCreate || canUpdate}
+          onCancel={() => setEditingUser(null)}
+          onSubmit={(patch) => void saveUserEdit(editingUser.id, patch)}
+        />
+      ) : null}
+
       {userForm ? (
         <UserEditor
           roles={roles}
@@ -315,6 +359,147 @@ export default function AccessAdminPage() {
         />
       ) : null}
     </>
+  );
+}
+
+/**
+ * Edit one account in place: name, email, role, and an optional password
+ * replacement. This is the same set the Add user form collects, so the two
+ * screens stay symmetrical — a typo in the email at creation was previously
+ * unfixable without deleting the account.
+ *
+ * The password box starts empty on purpose. The stored value is a bcrypt hash
+ * and cannot be shown; filling the box replaces it, leaving it blank keeps it.
+ */
+function UserEditDialog({
+  user,
+  roles,
+  canSave,
+  onCancel,
+  onSubmit,
+}: {
+  user: UserOption;
+  roles: RoleOption[];
+  canSave: boolean;
+  onCancel: () => void;
+  onSubmit: (patch: {
+    name: string;
+    email: string;
+    role: string;
+    password?: string;
+  }) => void;
+}) {
+  const [name, setName] = useState(user.name);
+  const [email, setEmail] = useState(user.email);
+  const [role, setRole] = useState(user.role);
+  const [password, setPassword] = useState('');
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  function submit(event: React.FormEvent): void {
+    event.preventDefault();
+    setLocalError(null);
+    if (!name.trim()) {
+      setLocalError('Name cannot be blank.');
+      return;
+    }
+    if (!email.trim()) {
+      setLocalError('Email cannot be blank — it is the login id.');
+      return;
+    }
+    if (password !== '' && password.length < 8) {
+      setLocalError('New password must be at least 8 characters.');
+      return;
+    }
+    onSubmit({
+      name: name.trim(),
+      email: email.trim().toLowerCase(),
+      role,
+      ...(password !== '' ? { password } : {}),
+    });
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4"
+      style={{ background: 'rgba(15, 23, 42, 0.45)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Edit ${user.name}`}
+      onClick={() => canSave && onCancel()}
+    >
+      <form
+        onSubmit={submit}
+        className="my-6 w-full max-w-md rounded"
+        style={{ background: 'var(--panel)', border: '1px solid var(--line)', padding: '18px' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="m-0 mb-4 text-[15px] font-semibold">Edit user · {user.name}</h3>
+
+        {localError ? (
+          <div className="mb-3">
+            <Notice>{localError}</Notice>
+          </div>
+        ) : null}
+
+        <div className="grid gap-3">
+          <FieldRow label="Name" required>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={!canSave}
+              placeholder="Full name"
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)' }}
+            />
+          </FieldRow>
+          <FieldRow label="Email" hint="lowercase, login id — must be unique" required>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value.toLowerCase())}
+              disabled={!canSave}
+              placeholder="user@kec.in"
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)' }}
+            />
+          </FieldRow>
+          <FieldRow label="Role" required>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              disabled={!canSave}
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)', background: '#fff' }}
+            >
+              {roles.map((r) => (
+                <option key={r.name} value={r.name}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          </FieldRow>
+          <FieldRow
+            label="New password"
+            hint="Leave blank to keep the current password. Stored passwords are one-way hashes and cannot be shown."
+          >
+            <PasswordField
+              id="access-user-edit-password"
+              value={password}
+              onChange={setPassword}
+              autoComplete="new-password"
+              placeholder="Unchanged"
+              disabled={!canSave}
+            />
+          </FieldRow>
+        </div>
+
+        <div className="mt-4 flex justify-end gap-2">
+          <Button onClick={onCancel}>Cancel</Button>
+          <Button type="submit" variant="primary" disabled={!canSave}>
+            Save changes
+          </Button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -508,14 +693,19 @@ function RoleEditor({
         permissions: selected,
         projectScopeAll: scopeAll,
       };
+      if (!label.trim()) {
+        setError(isNew ? 'Name and label are required for a new role.' : 'Label cannot be empty.');
+        setBusy(false);
+        return;
+      }
+      body.label = label.trim();
       if (isNew) {
-        if (!name.trim() || !label.trim()) {
+        if (!name.trim()) {
           setError('Name and label are required for a new role.');
           setBusy(false);
           return;
         }
         body.name = name.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
-        body.label = label.trim();
       }
       await onSubmit(body, assignedUsers.size > 0 ? [...assignedUsers] : undefined);
     } catch (err) {
@@ -571,7 +761,23 @@ function RoleEditor({
               </FieldRow>
             </div>
           </>
-        ) : null}
+        ) : (
+          // Editing an existing role: label is the only name-ish field the user
+          // sees elsewhere in the app, so it must be editable here. The internal
+          // name stays fixed — permissions and assignment store it directly.
+          <div className="mb-3">
+            <FieldRow label="Label" hint={`Internal name ${role?.name ?? ''} stays fixed`} required>
+              <input
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                disabled={!canSave}
+                placeholder="e.g. Site Engineer"
+                className="w-full rounded px-2.5 py-1.5 text-[13px]"
+                style={{ border: '1px solid var(--line)' }}
+              />
+            </FieldRow>
+          </div>
+        )}
 
         <div className="mb-3">
           <FieldRow label="Permissions" hint="Toggle what this role may do, grouped by module">

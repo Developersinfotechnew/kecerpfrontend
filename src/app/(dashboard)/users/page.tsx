@@ -48,6 +48,8 @@ export default function UsersPage() {
   const [projectEditing, setProjectEditing] = useState<UserRow | null>(null);
   const [projectDraft, setProjectDraft] = useState<Set<string>>(new Set());
   const [projectBusy, setProjectBusy] = useState(false);
+  const [editUser, setEditUser] = useState<UserRow | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
   const [clients, setClients] = useState<ClientEntity[]>([]);
   const canApprove = can('admin:approve');
 
@@ -113,6 +115,42 @@ export default function UsersPage() {
       setError(err instanceof Error ? err.message : 'Failed to save project assignment');
     } finally {
       setProjectBusy(false);
+    }
+  }
+
+  /**
+   * Save the edit dialog. Only the fields the backend accepts are sent: name,
+   * role, active flag and a replacement password. Email is the login id and is
+   * not editable here; project scope and module access have their own dialogs.
+   */
+  async function saveEditUser(patch: {
+    name: string;
+    role: string;
+    isActive: boolean;
+    password?: string;
+  }): Promise<void> {
+    if (!editUser) return;
+    setEditBusy(true);
+    setError(null);
+    try {
+      await admin.updateUser(editUser.id, patch);
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === editUser.id
+            ? {
+                ...r,
+                name: patch.name,
+                role: patch.role,
+                isActive: patch.isActive,
+              }
+            : r,
+        ),
+      );
+      setEditUser(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update user');
+    } finally {
+      setEditBusy(false);
     }
   }
 
@@ -248,6 +286,16 @@ export default function UsersPage() {
         />
       ) : null}
 
+      {editUser ? (
+        <EditUserDialog
+          user={editUser}
+          roles={roles}
+          busy={editBusy}
+          onCancel={() => setEditUser(null)}
+          onSubmit={(patch) => void saveEditUser(patch)}
+        />
+      ) : null}
+
       {canApprove && pendingRows.length > 0 ? (
         <Panel
           title="Pending approvals"
@@ -365,6 +413,16 @@ export default function UsersPage() {
                     {row.isActive ? 'Active' : 'Disabled'}
                   </Chip>
                 )}
+                {canApprove ? (
+                  <button
+                    onClick={() => setEditUser(row)}
+                    className="text-[11.5px] font-medium"
+                    style={{ color: 'var(--blue)', cursor: 'pointer', background: 'none', border: 'none', padding: 0 }}
+                    title="Edit name, role, status and password"
+                  >
+                    edit
+                  </button>
+                ) : null}
                 {canApprove ? (
                   <button
                     onClick={() => openProjectEditor(row)}
@@ -802,6 +860,163 @@ function ProjectAssignDialog({
               {busy ? 'Saving…' : 'Save scope'}
             </Button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface EditUserDialogProps {
+  user: UserRow;
+  roles: RoleOption[];
+  busy: boolean;
+  onCancel: () => void;
+  onSubmit: (patch: {
+    name: string;
+    role: string;
+    isActive: boolean;
+    password?: string;
+  }) => void;
+}
+
+/**
+ * Edit an existing account. Mirrors the Add user form's fields, minus email —
+ * that is the login id and the backend has no route to change it. Password is
+ * optional: blank leaves the stored hash untouched, filled replaces it.
+ */
+function EditUserDialog({ user, roles, busy, onCancel, onSubmit }: EditUserDialogProps) {
+  const [name, setName] = useState(user.name);
+  const [role, setRole] = useState(user.role);
+  const [active, setActive] = useState(user.isActive);
+  const [password, setPassword] = useState('');
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  function submit(): void {
+    setLocalError(null);
+    if (!name.trim()) {
+      setLocalError('Name cannot be blank.');
+      return;
+    }
+    if (password !== '' && password.length < 8) {
+      setLocalError('New password must be at least 8 characters.');
+      return;
+    }
+    onSubmit({
+      name: name.trim(),
+      role,
+      isActive: active,
+      ...(password !== '' ? { password } : {}),
+    });
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center p-4"
+      style={{ background: 'rgba(15, 23, 41, 0.45)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Edit ${user.name}`}
+    >
+      <div
+        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded"
+        style={{ background: 'var(--panel)', border: '1px solid var(--line)' }}
+      >
+        <div
+          className="flex items-center justify-between px-4 py-3"
+          style={{ borderBottom: '1px solid var(--line-2)' }}
+        >
+          <div>
+            <h3 className="m-0 text-[14px] font-semibold">Edit user · {user.name}</h3>
+            <p className="m-0 mt-0.5 text-[11.5px]" style={{ color: 'var(--muted)' }}>
+              {user.email} · email is the login id and cannot be changed here
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-[18px] leading-none"
+            style={{ color: 'var(--muted)' }}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="grid gap-3 p-4">
+          {localError ? (
+            <p className="m-0 text-[12.5px]" style={{ color: 'var(--red)' }} role="alert">
+              {localError}
+            </p>
+          ) : null}
+
+          <label className="block">
+            <span className="mb-1 block text-[12px]" style={{ color: 'var(--muted)' }}>
+              Full name *
+            </span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)', background: '#fff' }}
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-[12px]" style={{ color: 'var(--muted)' }}>
+              Role
+            </span>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)', background: '#fff' }}
+            >
+              {roles.map((r) => (
+                <option key={r.name} value={r.name}>{r.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-[12px]" style={{ color: 'var(--muted)' }}>
+              New password
+            </span>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Leave blank to keep the current password"
+              autoComplete="new-password"
+              className="w-full rounded px-2.5 py-1.5 text-[13px]"
+              style={{ border: '1px solid var(--line)', background: '#fff' }}
+            />
+            <span className="mt-1 block text-[11px]" style={{ color: 'var(--faint)' }}>
+              Stored passwords are one-way hashes, so the current one cannot be read back.
+              Filling this replaces it.
+            </span>
+          </label>
+
+          <label className="flex items-center gap-2 text-[13px]">
+            <input
+              type="checkbox"
+              checked={active}
+              onChange={(e) => setActive(e.target.checked)}
+              className="h-4 w-4"
+            />
+            Active — can sign in
+          </label>
+        </div>
+
+        <div
+          className="flex justify-end gap-2 px-4 py-3"
+          style={{ borderTop: '1px solid var(--line-2)' }}
+        >
+          <Button onClick={onCancel} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={submit} disabled={busy}>
+            {busy ? 'Saving…' : 'Save changes'}
+          </Button>
         </div>
       </div>
     </div>

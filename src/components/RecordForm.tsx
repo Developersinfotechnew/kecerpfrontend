@@ -38,11 +38,19 @@ interface RecordFormProps {
    * does not show writes back whatever the record already held.
    */
   excludeFields?: string[];
+  /**
+   * Auto-fill rule: given the field the operator just changed and the whole
+   * form's values after that change, return any fields to fill in. The BOQ item
+   * form uses it so qty × rate fills the amount, and an imported amount-only
+   * line gets its rate back — the operator never types the same number twice.
+   * Returns null (or nothing) when no field can be derived yet.
+   */
+  deriveFrom?: (changed: string, values: Record<string, unknown>) => Record<string, unknown> | null;
   onCancel: () => void;
   onSubmit: (body: Record<string, unknown>) => Promise<void>;
 }
 
-export function RecordForm({ type, record, initialValues, onCancel, onSubmit, excludeFields }: RecordFormProps) {
+export function RecordForm({ type, record, initialValues, onCancel, onSubmit, excludeFields, deriveFrom }: RecordFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [projectId, setProjectId] = useState<string>('');
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
@@ -376,6 +384,19 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit, ex
               filteredOptions = liveRowsForField
                 .filter((r) => String(r.data[matchField] ?? '') === codeMatch)
                 .map((r) => r.title);
+              // Fallback: if the source register has no true child rows for
+              // the picked parent (flat WBS, or the first pick before any
+              // children are added), offer the full list minus the sibling
+              // so the dropdown is never a dead end.
+              if (
+                filteredOptions.length === 0 &&
+                siblingValue !== '' &&
+                liveRowsForField.length > 0
+              ) {
+                filteredOptions = liveRowsForField
+                  .filter((r) => r.title !== siblingValue)
+                  .map((r) => r.title);
+              }
             }
             const mergedOptions = f.optionsFrom
               ? filteredOptions !== null
@@ -389,6 +410,14 @@ export function RecordForm({ type, record, initialValues, onCancel, onSubmit, ex
                 value={values[f.key]}
                 onChange={(v) => {
                   set(f.key, v);
+                  // Derived fields (the BOQ line's amount / rate): fill from
+                  // the values as they now stand, so the operator types a
+                  // quantity and the money updates itself.
+                  if (deriveFrom) {
+                    const next = { ...values, [f.key]: v };
+                    const derived = deriveFrom(f.key, next);
+                    if (derived) setValues((s) => ({ ...s, ...derived }));
+                  }
                   // Linked dropdown: changing the main task orphans the sub
                   // task picked against the old one, so clear every field
                   // whose options are filtered off this field's value.

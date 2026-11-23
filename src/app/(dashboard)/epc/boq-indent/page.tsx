@@ -4,9 +4,20 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { RecordForm } from '@/components/RecordForm';
 import { ImportExcelModal } from '@/components/ImportExcelModal';
+import {
+  BOQ_KEY,
+  IND_KEY,
+  IndentDialog,
+  counts,
+  fmtDay,
+  inr,
+  linesOf,
+  qtyf,
+} from '@/components/IndentDialog';
 import { Button, Chip, DataTable, Grid, KpiGrid, Notice, PageHead, Panel } from '@/components/ui';
 import type { ChipTone } from '@/components/ui';
 import { toast } from '@/components/toast';
+import { deriveBoqLine, isLumpSum, lineAmount, lineRate, lineUnits, round2 } from '@/lib/boq-price';
 import { openPrintReport } from '@/lib/print-report';
 import { records } from '@/lib/services';
 import { useSession } from '@/app/session';
@@ -24,46 +35,6 @@ import type { RecordRow, RecordType } from '@/lib/types';
  * arithmetic of the indent lines against the BOQ quantity, so they move the
  * moment a line moves. Nothing here is stored as a snapshot.
  */
-
-const BOQ_KEY = 'boq_register';
-const IND_KEY = 'boq_indents';
-
-/** An indent's item line as it is stored: the boq_register ref + quantity. */
-interface IndentLine {
-  boqRef: string;
-  qty: number;
-}
-
-/** Rejected indents do not count: they were withdrawn, so the balance comes back. */
-const counts = (p: RecordRow): boolean => String(p.data.status ?? '') !== 'Rejected';
-
-/** The stored `lines` table, coerced to a safe shape. */
-function linesOf(row: RecordRow): IndentLine[] {
-  const raw = row.data.lines;
-  if (!Array.isArray(raw)) return [];
-  const out: IndentLine[] = [];
-  for (const r of raw) {
-    if (!r || typeof r !== 'object') continue;
-    const ref = String((r as { boqRef?: unknown }).boqRef ?? '').trim();
-    if (!ref) continue;
-    out.push({ boqRef: ref, qty: Number((r as { qty?: unknown }).qty) || 0 });
-  }
-  return out;
-}
-
-/** ₹ with Indian digit grouping, two decimals — the desk's money voice. */
-const inr = (n: number): string => (n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-/** Whole-number Indian grouping, for quantities. */
-const qtyf = (n: number): string => (n || 0).toLocaleString('en-IN');
-/** Today as an ISO day. */
-const today = (): string => new Date().toISOString().slice(0, 10);
-/** A stored date as 12 Sep 2026, or an em dash when absent. */
-const fmtDay = (v: unknown): string => {
-  if (v === null || v === undefined || String(v).trim() === '') return '—';
-  const d = new Date(String(v));
-  if (Number.isNaN(d.getTime())) return String(v);
-  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-};
 
 const PRIORITY_TONE: Record<string, ChipTone> = { Urgent: 'bad', Normal: 'info', Low: 'mute' };
 const STATUS_TONE: Record<string, ChipTone> = { Draft: 'mute', Submitted: 'warn', Approved: 'ok', Ordered: 'ok', Rejected: 'bad' };
@@ -92,28 +63,84 @@ export default function EpcBoqIndentPage() {
   // The indent / PR dialog.
   const [dlg, setDlg] = useState<RecordRow | 'new' | null>(null);
 
-  const load = useCallback(async () => {
+  /**
+   * Reloads both registers and reports whether the indent list itself read.
+   *
+   * The two registers load independently: a failure on the BOQ list must not
+   * blank the indents (and vice versa), because a single broken read used to
+   * make the whole desk read "0 raised" with an empty table — the exact screen
+   * behind Objection 5. `ok` now means "the indents list was read": `false`
+   * is a read failure, not an empty list, and the caller must not confuse the
+   * two when judging a save.
+   */
+  const load = useCallback(async (): Promise<{ items: RecordRow[]; ok: boolean }> => {
     setLoading(true);
     setError(null);
+    const failed: string[] = [];
     try {
-      const [t, b, p] = await Promise.all([
+      const [t, b] = await Promise.all([
         records.type(BOQ_KEY),
         records.list(BOQ_KEY, { limit: 500 }),
-        records.list(IND_KEY, { limit: 500 }),
       ]);
       setBoqType(t);
       setBoq(b.items);
-      setIndents(p.items);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load the desk');
-    } finally {
-      setLoading(false);
+      failed.push(`BOQ list: ${err instanceof Error ? err.message : 'could not load'}`);
     }
+    let pItems: RecordRow[] = [];
+    let indOk = false;
+    try {
+      const p = await records.list(IND_KEY, { limit: 500 });
+      pItems = p.items;
+      setIndents(pItems);
+      indOk = true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'could not load';
+      // A 404 names the missing register: a backend that has not run the
+      // catalogue sync since boq_indents was added cannot list or create it.
+      failed.push(
+        `Indents list: ${msg} (if the register is missing, restart the backend so the catalogue sync seeds it)`,
+      );
+    }
+    if (failed.length > 0) setError(failed.join(' · '));
+    setLoading(false);
+    return { items: indOk ? pItems : [], ok: indOk };
   }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  /**
+   * After a write: reload, then say what actually happened.
+   *
+   * The list is the only truth. When the written reference comes back, the
+   * save is confirmed and the dialog closes. When it does not, the row either
+   * did not persist or the list is hiding it behind a scope/cap — both are
+   * named with the reference and the list size, so the operator never has to
+   * guess which. Objection 5 was exactly this guess being made for them.
+   */
+  async function confirmSaved(ref: string): Promise<void> {
+    const fresh = await load();
+    setDlg(null);
+    if (!fresh.ok) {
+      // The write returned a reference; the read failed. Saying "failed"
+      // would send the operator to retype a document that already exists.
+      toast(`${ref || 'Indent'} was saved, but the list could not reload. Refresh the page.`, 'warn', 12000);
+      return;
+    }
+    if (ref === '' || fresh.items.some((r) => r.ref === ref)) {
+      toast(`${ref || 'Indent'} saved.`, 'ok', 6000);
+      return;
+    }
+    // Persisted, but this list does not carry it: the row belongs to a project
+    // the list is not filtered to, or the register is past its 500-row cap.
+    toast(
+      `${ref} was saved but is not in this list (${fresh.items.length} shown). It may sit under another project — filter Indents / PR to that project to see it.`,
+      'warn',
+      12000,
+    );
+  }
 
   // --- derived: per-BOQ-ref indented qty and the desk's headline values ----
   const indented = useMemo(() => {
@@ -125,18 +152,30 @@ export default function EpcBoqIndentPage() {
     return byRef;
   }, [indents]);
 
-  // BOQ amounts are stored in ₹L; the desk speaks whole rupees.
-  const boqValue = useMemo(
-    () => boq.reduce((s, r) => s + (Number(r.data.amount) || 0) * 100_000, 0),
-    [boq],
-  );
-  const rateOf = useCallback(
-    (ref: string) => Number(boq.find((b) => b.ref === ref)?.data.rate ?? 0),
-    [boq],
+  // BOQ amounts are stored in ₹L; the desk speaks whole rupees. The sum uses
+  // the same per-line rule as every column (lineAmount), so a line priced by
+  // qty × rate counts at its money even when no amount was typed — and the
+  // BOQ value, the BOQ tab's Total and the Indented/Balance KPIs can never
+  // disagree about what a line is worth.
+  const boqValue = useMemo(() => boq.reduce((s, r) => s + lineAmount(r), 0), [boq]);
+  // A BOQ row without an explicit rate falls back to its own amount ÷ qty.
+  // Amount-only imports carry the whole line's ₹ value in `amount` (₹L) and
+  // leave `rate` empty; derived indent values would otherwise read 0 for
+  // every line even though the BOQ value is fully populated. Objection 4:
+  // the whole desk prices through this one shared rule. A lump-sum line
+  // (amount, no qty) prices at its whole amount for its single unit, so an
+  // indent against the client's five amount-only rows carries real money.
+  const rowRate = useCallback((r: RecordRow) => lineRate(r), []);
+  const rateOfRef = useCallback(
+    (ref: string) => {
+      const r = boq.find((b) => b.ref === ref);
+      return r ? rowRate(r) : 0;
+    },
+    [boq, rowRate],
   );
   const indentValue = useCallback(
-    (p: RecordRow) => linesOf(p).reduce((s, l) => s + l.qty * rateOf(l.boqRef), 0),
-    [rateOf],
+    (p: RecordRow) => linesOf(p).reduce((s, l) => s + l.qty * rateOfRef(l.boqRef), 0),
+    [rateOfRef],
   );
   const indentedValue = useMemo(
     () => indents.reduce((s, p) => (counts(p) ? s + indentValue(p) : s), 0),
@@ -215,15 +254,21 @@ export default function EpcBoqIndentPage() {
           title: 'Bill of Quantities',
           head: ['Sl', 'Item no', 'Description', 'Unit', 'Qty', 'Rate', 'Amount'],
           aligns: ['left', 'left', 'left', 'left', 'right', 'right', 'right'],
-          rows: boq.map((b, i) => [
-            String(i + 1),
-            b.ref,
-            String(b.data.description ?? ''),
-            String(b.data.unit ?? ''),
-            qtyf(Number(b.data.quantity) || 0),
-            inr(Number(b.data.rate) || 0),
-            inr((Number(b.data.amount) || 0) * 100_000),
-          ]),
+          rows: boq.map((b, i) => {
+            const r = rowRate(b);
+            const q = Number(b.data.quantity) || 0;
+            // A lump-sum line prints as one unit at the whole amount, so the
+            // paper reads the same money the screen does.
+            return [
+              String(i + 1),
+              b.ref,
+              String(b.data.description ?? ''),
+              String(b.data.unit ?? ''),
+              q > 0 ? qtyf(q) : isLumpSum(b) ? '1 (lump sum)' : '—',
+              inr(r),
+              inr(lineAmount(b)),
+            ];
+          }),
         },
       ],
       notes: `Total: ${inr(boqValue)}`,
@@ -238,7 +283,7 @@ export default function EpcBoqIndentPage() {
       return;
     }
     const lines = linesOf(p);
-    const total = lines.reduce((s, l) => s + l.qty * rateOf(l.boqRef), 0);
+    const total = lines.reduce((s, l) => s + l.qty * rateOfRef(l.boqRef), 0);
     openPrintReport({
       title: 'Purchase Request / Indent',
       sub: p.ref,
@@ -257,14 +302,15 @@ export default function EpcBoqIndentPage() {
           aligns: ['left', 'left', 'left', 'left', 'right', 'right', 'right'],
           rows: lines.map((l, i) => {
             const b = boq.find((x) => x.ref === l.boqRef);
+            const q = Number(b?.data.quantity ?? 0);
             return [
               String(i + 1),
               l.boqRef,
               String(b?.data.description ?? l.boqRef),
               String(b?.data.unit ?? ''),
-              qtyf(Number(b?.data.quantity ?? 0)),
+              q > 0 ? qtyf(q) : isLumpSum(b) ? 'lump sum' : '—',
               qtyf(l.qty),
-              inr(l.qty * rateOf(l.boqRef)),
+              inr(l.qty * rateOfRef(l.boqRef)),
             ];
           }),
         },
@@ -278,15 +324,17 @@ export default function EpcBoqIndentPage() {
   function exportCsvBoq(): void {
     const head = ['Item No', 'Description', 'Unit', 'Qty', 'Rate', 'Amount', 'Indented', 'Balance'];
     const rows = boq.map((b) => {
-      const q = Number(b.data.quantity) || 0;
+      // Same basis as the BOQ tab: a lump-sum line carries one unit, so the
+      // export's Qty/Balance columns match what the screen shows.
+      const q = lineUnits(b);
       const ind = indented.get(b.ref) ?? 0;
       return [
         b.ref,
         String(b.data.description ?? ''),
         String(b.data.unit ?? ''),
         q,
-        Number(b.data.rate) || 0,
-        inr(q * (Number(b.data.rate) || 0)),
+        rowRate(b),
+        inr(lineAmount(b)),
         ind,
         q - ind,
       ];
@@ -313,14 +361,17 @@ export default function EpcBoqIndentPage() {
     ];
     const rows = lines.map((l) => {
       const b = boq.find((x) => x.ref === l.boqRef);
+      const q = Number(b?.data.quantity ?? 0);
       return [
         l.boqRef,
         String(b?.data.description ?? l.boqRef),
         String(b?.data.unit ?? ''),
-        Number(b?.data.quantity ?? 0),
+        // A lump-sum line has no BOQ qty; the indent is one line at the whole
+        // amount, so the sheet says so instead of printing 0.
+        q > 0 ? q : isLumpSum(b) ? 'lump sum' : 0,
         l.qty,
-        rateOf(l.boqRef),
-        inr(l.qty * rateOf(l.boqRef)),
+        rateOfRef(l.boqRef),
+        inr(l.qty * rateOfRef(l.boqRef)),
       ];
     });
     downloadCsv(`${String(p.data.prNo ?? p.ref).replace(/[^a-zA-Z0-9-_]+/g, '-')}.csv`, [...meta, ...rows]);
@@ -363,6 +414,13 @@ export default function EpcBoqIndentPage() {
         ))}
       </div>
 
+      {/*
+        A failed desk load (a red Notice, not a blank spinner) is the
+        difference between "no documents are saved" and "the list could not be
+        read". Objection 5 read as lost documents because a failed indents
+        list left the screen looking identical to a healthy empty one.
+        The error is now visible on every tab.
+      */}
       {error ? <Notice>{error}</Notice> : null}
       {loading ? (
         <div className="py-10 text-center text-[13px]" style={{ color: 'var(--muted)' }}>Loading…</div>
@@ -389,6 +447,7 @@ export default function EpcBoqIndentPage() {
             <BoqTab
               boq={boq}
               indented={indented}
+              rowRate={rowRate}
               mayCreate={mayCreate}
               onAdd={() => setBoqForm('new')}
               onEdit={(r) => setBoqForm(r)}
@@ -415,12 +474,16 @@ export default function EpcBoqIndentPage() {
               doc={ptDoc}
               prId={ptPr}
               indents={indents}
+              boqCount={boq.length}
               onDoc={setPtDoc}
               onPr={setPtPr}
               onPrintBoq={printBoq}
               onPrintPr={printIndent}
               onCsvBoq={exportCsvBoq}
               onCsvPr={exportCsvIndent}
+              onNew={() => setDlg('new')}
+              mayNew={mayCreate}
+              onGoPr={() => setTab('pr')}
             />
           ) : null}
         </>
@@ -436,6 +499,10 @@ export default function EpcBoqIndentPage() {
           // Excluded here on this desk only; the generic BOQ screen keeps
           // them, and editing never wipes a value a later stage wrote.
           excludeFields={['orderedQty', 'vendor', 'poRef']}
+          // Objection 4: the price is never typed. Entering the BOQ qty on an
+          // amount-only line splits the amount into a rate, and entering a
+          // rate recomputes the amount — the line is priced either way.
+          deriveFrom={deriveBoqLine}
           onCancel={() => setBoqForm(null)}
           onSubmit={async (body) => {
             if (boqForm === 'new') await records.create(BOQ_KEY, body);
@@ -450,6 +517,19 @@ export default function EpcBoqIndentPage() {
       {importOpen && boqType ? (
         <ImportExcelModal
           type={boqType}
+          // Objection 4, at the source: a sheet that carries Amount but no
+          // Rate imports a line whose money never calculates. With a qty, the
+          // rate is derived from amount ÷ qty. With no qty the line stays a
+          // lump sum (one unit at the whole amount) — the desk prices it, so
+          // nothing is rejected for a column the sheet simply does not have.
+          prepare={(data) => {
+            const qty = Number(data.quantity) || 0;
+            const amount = Number(data.amount) || 0;
+            if (qty > 0 && amount > 0 && !(Number(data.rate) > 0)) {
+              return { ...data, rate: String(round2((amount * 100_000) / qty)) };
+            }
+            return data;
+          }}
           create={async (data) => {
             await records.create(BOQ_KEY, { data });
           }}
@@ -466,10 +546,7 @@ export default function EpcBoqIndentPage() {
           existing={dlg === 'new' ? null : dlg}
           suggestNo={suggestPrNo}
           onClose={() => setDlg(null)}
-          onSaved={() => {
-            setDlg(null);
-            void load();
-          }}
+          onSaved={(ref) => confirmSaved(ref)}
         />
       ) : null}
     </>
@@ -504,10 +581,17 @@ function Overview({
   mayNew: boolean;
 }) {
   // Items indented above their BOQ quantity — the desk's key red flag.
+  // A lump-sum line (amount-only import) caps at its single unit, so it is
+  // part of the check: indenting it twice reads as over-indented.
   const over = boq
-    .map((b) => ({ b, q: Number(b.data.quantity) || 0, i: indented.get(b.ref) ?? 0 }))
-    .filter((r) => r.i > r.q + 1e-9)
+    .map((b) => ({ b, q: lineUnits(b), i: indented.get(b.ref) ?? 0 }))
+    .filter((r) => r.q > 0 && r.i > r.q + 1e-9)
     .slice(0, 8);
+  // Lines with no indentable unit: no bid quantity and no amount either, so
+  // there is nothing to cap against and nothing to price from. They are named
+  // so the operator prices them on the BOQ tab, which turns the cap and the
+  // price on at once — Objection 4 is answered by data, not by a silent 0.
+  const noQty = boq.filter((b) => lineUnits(b) <= 0).slice(0, 8);
 
   return (
     <>
@@ -573,7 +657,12 @@ function Overview({
                   <span className="num text-[12px]" style={{ color: 'var(--muted)' }}>{r.b.ref}</span>
                   <span className="truncate">{String(r.b.data.description ?? '')}</span>
                   <span className="ml-auto shrink-0">
-                    <Chip tone="bad">{qtyf(r.i)} of {qtyf(r.q)} {String(r.b.data.unit ?? '')}</Chip>
+                    {/* A lump-sum line counts in whole lines, not units. */}
+                    <Chip tone="bad">
+                      {isLumpSum(r.b)
+                        ? `indented ${qtyf(r.i)} times (lump sum line)`
+                        : `${qtyf(r.i)} of ${qtyf(r.q)} ${String(r.b.data.unit ?? '')}`}
+                    </Chip>
                   </span>
                 </div>
               ))}
@@ -581,6 +670,28 @@ function Overview({
           )}
         </Panel>
       </Grid>
+
+      {/* Objection 4, the data side: a line with no bid quantity and no money
+          has no indentable unit, so its balance reads "—". Naming those lines
+          makes the gap visible instead of silent; pricing them on the BOQ tab
+          turns the cap and the price on at once. */}
+      {noQty.length > 0 ? (
+        <>
+          <div className="mt-[18px]" />
+          <Panel title="Lines that cannot be indented yet">
+            <p className="m-0 text-[12.5px]" style={{ color: 'var(--muted)' }}>
+              These lines have no BOQ quantity and no amount, so there is no unit to indent
+              and no price to carry — their Balance shows “—”. Give one on the BOQ tab (a BOQ
+              qty, an amount, or a rate) and the line becomes indentable straight away.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {noQty.map((b) => (
+                <Chip key={b.id} tone="warn">{b.ref} · {String(b.data.description ?? '')}</Chip>
+              ))}
+            </div>
+          </Panel>
+        </>
+      ) : null}
     </>
   );
 }
@@ -592,6 +703,7 @@ function Overview({
 function BoqTab({
   boq,
   indented,
+  rowRate,
   mayCreate,
   onAdd,
   onEdit,
@@ -600,6 +712,7 @@ function BoqTab({
 }: {
   boq: RecordRow[];
   indented: Map<string, number>;
+  rowRate: (b: RecordRow) => number;
   mayCreate: boolean;
   onAdd: () => void;
   onEdit: (r: RecordRow) => void;
@@ -615,8 +728,10 @@ function BoqTab({
     );
   }, [boq, filter]);
 
-  // The filtered total, so a search reads like a sub-ledger.
-  const total = rows.reduce((s, b) => s + (Number(b.data.quantity) || 0) * (Number(b.data.rate) || 0), 0);
+  // The filtered total, so a search reads like a sub-ledger. Each line's
+  // money comes from the shared price rule, so an amount-only imported line
+  // counts at the amount it carries instead of 0.
+  const total = rows.reduce((s, b) => s + lineAmount(b), 0);
 
   return (
     <Panel
@@ -656,18 +771,24 @@ function BoqTab({
               ? [[boq.length ? 'No items match the search.' : 'No items yet. Use Import Excel or Add item.']]
               : rows.map((b) => {
                   const q = Number(b.data.quantity) || 0;
-                  const rate = Number(b.data.rate) || 0;
+                  // A lump-sum line (amount, no qty) carries one indentable
+                  // unit, so its Indented/Balance count that unit rather than
+                  // showing "—" forever. Objection 4: the desk must answer
+                  // "how much of this line is left" for every priced line.
+                  const units = lineUnits(b);
+                  const lump = units > 0 && q <= 0;
+                  const rate = rowRate(b);
                   const ind = indented.get(b.ref) ?? 0;
-                  const bal = q - ind;
+                  const bal = units - ind;
                   return [
                     <span key="ref" className="num text-[12px]" style={{ color: 'var(--muted)' }}>{b.ref}</span>,
                     String(b.data.description ?? ''),
                     String(b.data.unit ?? ''),
-                    <span key="qty" className="num">{qtyf(q)}</span>,
+                    <span key="qty" className="num" title={lump ? 'Lump-sum line: no BOQ qty, so it carries one unit priced at the whole amount.' : units <= 0 ? 'No amount and no BOQ qty: nothing to price or cap against.' : undefined}>{q > 0 ? qtyf(q) : lump ? 'lump sum' : '—'}</span>,
                     <span key="rate" className="num">₹{inr(rate)}</span>,
-                    <span key="amt" className="num">₹{inr(q * rate)}</span>,
-                    <span key="ind" className="num">{qtyf(ind)}</span>,
-                    <span key="bal" className="num" style={bal < 0 ? { color: 'var(--danger)' } : undefined}>{qtyf(bal)}</span>,
+                    <span key="amt" className="num">₹{inr(lineAmount(b))}</span>,
+                    <span key="ind" className="num">{units > 0 ? qtyf(ind) : '—'}</span>,
+                    <span key="bal" className="num" style={units > 0 && bal < 0 ? { color: 'var(--danger)' } : undefined}>{units > 0 ? qtyf(bal) : '—'}</span>,
                     <span key="a" className="flex items-center justify-end gap-2 whitespace-nowrap">
                       <Button variant="primary" className="min-w-[60px] justify-center" onClick={() => onEdit(b)}>Edit</Button>
                       <Button variant="small" onClick={() => onDelete(b)}>Delete</Button>
@@ -784,22 +905,31 @@ function PrintTab({
   doc,
   prId,
   indents,
+  boqCount,
   onDoc,
   onPr,
   onPrintBoq,
   onPrintPr,
   onCsvBoq,
   onCsvPr,
+  onNew,
+  mayNew,
+  onGoPr,
 }: {
   doc: 'boq' | 'pr';
   prId: string;
   indents: RecordRow[];
+  /** How many BOQ lines the schedule would print; 0 means nothing to export. */
+  boqCount: number;
   onDoc: (d: 'boq' | 'pr') => void;
   onPr: (id: string) => void;
   onPrintBoq: () => void;
   onPrintPr: (id: string) => void;
   onCsvBoq: () => void;
   onCsvPr: (id: string) => void;
+  onNew: () => void;
+  mayNew: boolean;
+  onGoPr: () => void;
 }) {
   const sel = (
     <select
@@ -841,16 +971,36 @@ function PrintTab({
             </label>
           ) : null}
         </div>
+        {doc === 'boq' && boqCount === 0 ? (
+          <p className="m-0 mb-3 text-[12.5px]" style={{ color: 'var(--muted)' }}>
+            No BOQ lines yet — the schedule has nothing to print. Add items on the BOQ tab
+            (or import the sheet) and this tab fills in straight away.
+          </p>
+        ) : null}
+        {doc === 'pr' && indents.length === 0 ? (
+          <div className="mb-3">
+            <p className="m-0 text-[12.5px]" style={{ color: 'var(--muted)' }}>
+              No indent / PR documents to print yet.
+            </p>
+            <div className="mt-2">
+              {mayNew ? (
+                <Button variant="primary" onClick={onNew}>New indent</Button>
+              ) : (
+                <Button onClick={onGoPr}>Open Indents / PR</Button>
+              )}
+            </div>
+          </div>
+        ) : null}
         <div className="mt-4 flex flex-wrap items-center gap-2">
           {doc === 'boq' ? (
             <>
-              <Button variant="primary" onClick={onPrintBoq}>Download print file</Button>
-              <Button onClick={onCsvBoq}>Download Excel (CSV)</Button>
+              <Button variant="primary" disabled={boqCount === 0} onClick={onPrintBoq}>Download print file</Button>
+              <Button disabled={boqCount === 0} onClick={onCsvBoq}>Download Excel (CSV)</Button>
             </>
           ) : (
             <>
-              <Button variant="primary" onClick={() => onPrintPr(prId)}>Download print file</Button>
-              <Button onClick={() => onCsvPr(prId)}>Download Excel (CSV)</Button>
+              <Button variant="primary" disabled={!prId} onClick={() => onPrintPr(prId)}>Download print file</Button>
+              <Button disabled={!prId} onClick={() => onCsvPr(prId)}>Download Excel (CSV)</Button>
             </>
           )}
           <span className="text-[12px]" style={{ color: 'var(--muted)' }}>
@@ -859,283 +1009,6 @@ function PrintTab({
         </div>
       </Panel>
     </>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// The indent dialog — the desk's real value: pick BOQ lines, cap at balance.
-// ---------------------------------------------------------------------------
-
-function IndentDialog({
-  boq,
-  indented,
-  existing,
-  suggestNo,
-  onClose,
-  onSaved,
-}: {
-  boq: RecordRow[];
-  indented: Map<string, number>;
-  existing: RecordRow | null;
-  suggestNo: string;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const inp = 'w-full rounded px-2.5 py-[6px] text-[13px] outline-none';
-  const inpStyle: React.CSSProperties = { border: '1px solid var(--line)', background: 'var(--panel)', color: 'var(--text)' };
-
-  // The head fields start from the existing row, or fresh with a suggested no.
-  const [prNo, setPrNo] = useState(existing ? String(existing.data.prNo ?? '') : suggestNo);
-  const [date, setDate] = useState(existing ? fmtDay(existing.data.date) : today());
-  const [needBy, setNeedBy] = useState(existing ? fmtDay(existing.data.needBy) : '');
-  const [raisedBy, setRaisedBy] = useState(existing ? String(existing.data.raisedBy ?? '') : '');
-  const [deliverySite, setDeliverySite] = useState(existing ? String(existing.data.deliverySite ?? '') : '');
-  const [priority, setPriority] = useState(existing ? String(existing.data.priority ?? 'Normal') : 'Normal');
-  const [remarks, setRemarks] = useState(existing ? String(existing.data.remarks ?? '') : '');
-  // The status is carried on the saved row; the dialog edits its own fields.
-  const [status] = useState(existing ? String(existing.data.status ?? 'Draft') : 'Draft');
-
-  // Per-BOQ-ref indent quantity, prefilled from the existing row's lines.
-  const [q, setQ] = useState<Record<string, string>>(() => {
-    const init: Record<string, string> = {};
-    for (const l of existing ? linesOf(existing) : []) init[l.boqRef] = String(l.qty);
-    return init;
-  });
-  const [dq, setDq] = useState('');
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const rateOf = (ref: string): number => Number(boq.find((b) => b.ref === ref)?.data.rate ?? 0);
-
-  // When editing, this indent's own lines were already counted in `indented`,
-  // so give them back before comparing against the balance.
-  const myOwn = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const l of existing ? linesOf(existing) : []) m.set(l.boqRef, l.qty);
-    return m;
-  }, [existing]);
-  const balanceOf = (b: RecordRow): number =>
-    (Number(b.data.quantity) || 0) - (indented.get(b.ref) ?? 0) + (myOwn.get(b.ref) ?? 0);
-
-  const shown = useMemo(() => {
-    const f = dq.trim().toLowerCase();
-    if (!f) return boq;
-    return boq.filter((b) => (b.ref + ' ' + String(b.data.description ?? '')).toLowerCase().includes(f));
-  }, [boq, dq]);
-
-  // Live count + estimated total as the operator types.
-  let nSel = 0;
-  let total = 0;
-  for (const b of boq) {
-    const n = Number(q[b.ref]) || 0;
-    if (n > 0) nSel += 1;
-    total += n * rateOf(b.ref);
-  }
-
-  async function save(): Promise<void> {
-    const lines: IndentLine[] = [];
-    let firstErr = '';
-    for (const b of boq) {
-      const n = Number(q[b.ref]) || 0;
-      if (n <= 0) continue;
-      const bal = balanceOf(b);
-      if (n > bal + 1e-9 && !firstErr) {
-        firstErr = `Item ${b.ref}: indent qty ${qtyf(n)} is above the balance of ${qtyf(bal)}.`;
-      }
-      lines.push({ boqRef: b.ref, qty: n });
-    }
-    if (lines.length === 0) firstErr = firstErr || 'Enter an indent quantity for at least one item.';
-    if (!prNo.trim()) firstErr = firstErr || 'PR number is required.';
-    if (firstErr) {
-      setErr(firstErr);
-      return;
-    }
-
-    setBusy(true);
-    setErr('');
-    try {
-      const body = {
-        data: {
-          prNo,
-          date,
-          needBy,
-          raisedBy,
-          deliverySite,
-          priority,
-          estValue: total,
-          remarks,
-          status,
-          lines,
-        },
-      };
-      if (existing) await records.update(IND_KEY, existing.id, body);
-      else await records.create(IND_KEY, body);
-      // Objection 3 asked for a confirmation: the desk reloaded without
-      // saying what happened.
-      toast(existing ? `Indent ${existing.ref} updated.` : `Indent saved (${prNo.trim()}).`, 'ok');
-      onSaved();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Could not save the indent');
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-50 grid place-items-center p-4"
-      style={{ background: 'rgba(15, 23, 41, 0.45)' }}
-      role="dialog"
-      aria-modal="true"
-    >
-      <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-lg" style={{ background: 'var(--panel)', border: '1px solid var(--line)' }}>
-        <header className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid var(--line-2)' }}>
-          <h3 className="m-0 text-[14px] font-semibold">{existing ? `Edit ${existing.ref}` : 'New indent'}</h3>
-          <button
-            type="button"
-            className="text-[18px] leading-none"
-            style={{ color: 'var(--muted)', background: 'none', border: 'none', cursor: 'pointer' }}
-            onClick={onClose}
-            aria-label="Close"
-          >
-            ×
-          </button>
-        </header>
-
-        <div className="p-4">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <label className="text-[12px]" style={{ color: 'var(--muted)' }}>
-              PR no
-              <div className="mt-1"><input value={prNo} onChange={(e) => setPrNo(e.target.value)} className={inp} style={inpStyle} /></div>
-            </label>
-            <label className="text-[12px]" style={{ color: 'var(--muted)' }}>
-              Date
-              <div className="mt-1"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inp} style={inpStyle} /></div>
-            </label>
-            <label className="text-[12px]" style={{ color: 'var(--muted)' }}>
-              Required by
-              <div className="mt-1"><input type="date" value={needBy} onChange={(e) => setNeedBy(e.target.value)} className={inp} style={inpStyle} /></div>
-            </label>
-            <label className="text-[12px]" style={{ color: 'var(--muted)' }}>
-              Raised by
-              <div className="mt-1"><input value={raisedBy} onChange={(e) => setRaisedBy(e.target.value)} className={inp} style={inpStyle} /></div>
-            </label>
-            <label className="text-[12px]" style={{ color: 'var(--muted)' }}>
-              Delivery site
-              <div className="mt-1"><input value={deliverySite} onChange={(e) => setDeliverySite(e.target.value)} className={inp} style={inpStyle} /></div>
-            </label>
-            <label className="text-[12px]" style={{ color: 'var(--muted)' }}>
-              Priority
-              <div className="mt-1">
-                <select value={priority} onChange={(e) => setPriority(e.target.value)} className={inp} style={inpStyle}>
-                  {['Low', 'Normal', 'Urgent'].map((p) => <option key={p} value={p}>{p}</option>)}
-                </select>
-              </div>
-            </label>
-            <label className="text-[12px] sm:col-span-3" style={{ color: 'var(--muted)' }}>
-              Remarks
-              <div className="mt-1"><textarea rows={2} value={remarks} onChange={(e) => setRemarks(e.target.value)} className={inp} style={inpStyle} /></div>
-            </label>
-          </div>
-
-          <div className="mt-4 flex items-center gap-2">
-            <input
-              type="search"
-              value={dq}
-              onChange={(e) => setDq(e.target.value)}
-              placeholder="Filter BOQ items"
-              className={inp}
-              style={{ ...inpStyle, flex: 1 }}
-            />
-            <span className="whitespace-nowrap text-[12px]" style={{ color: 'var(--muted)' }}>
-              {nSel} item{nSel === 1 ? '' : 's'} selected · ₹{inr(total)}
-            </span>
-          </div>
-
-          <div className="mt-2 max-h-[38vh] overflow-auto rounded" style={{ border: '1px solid var(--line)' }}>
-            <table className="w-full border-collapse text-[12.5px]">
-              <thead style={{ background: 'var(--panel-2)' }}>
-                <tr>
-                  {['Item no', 'Description', 'BOQ qty', 'Balance', 'Rate', 'Indent qty', 'Amount'].map((h, i) => (
-                    <th
-                      key={i}
-                      className="px-2 py-1 text-[11px] font-semibold"
-                      style={{
-                        border: '1px solid var(--line)',
-                        color: 'var(--muted)',
-                        textAlign: i >= 2 ? 'right' : 'left',
-                        textTransform: 'uppercase',
-                        letterSpacing: '.04em',
-                      }}
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {shown.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="px-3 py-6 text-center" style={{ color: 'var(--muted)' }}>
-                      {boq.length === 0 ? 'Add BOQ items first.' : 'No items match the filter.'}
-                    </td>
-                  </tr>
-                ) : (
-                  shown.map((b) => {
-                    const bal = balanceOf(b);
-                    const v = q[b.ref] ?? '';
-                    const over = Number(v) > bal + 1e-9;
-                    return (
-                      <tr key={b.id}>
-                        <td className="num px-2 py-1.5" style={{ border: '1px solid var(--line)', color: 'var(--muted)' }}>{b.ref}</td>
-                        <td className="px-2 py-1.5" style={{ border: '1px solid var(--line)' }}>{String(b.data.description ?? '')}</td>
-                        <td className="num px-2 py-1.5 text-right" style={{ border: '1px solid var(--line)' }}>
-                          <span title="BOQ qty">{qtyf(Number(b.data.quantity) || 0)}</span>
-                        </td>
-                        <td className="num px-2 py-1.5 text-right" style={{ border: '1px solid var(--line)', color: bal < 0 ? 'var(--danger)' : undefined }} title="Balance">
-                          {qtyf(bal)}
-                        </td>
-                        <td className="num px-2 py-1.5 text-right" style={{ border: '1px solid var(--line)', color: rateOf(b.ref) > 0 ? undefined : 'var(--danger)' }} title={rateOf(b.ref) > 0 ? 'BOQ rate' : 'No BOQ rate set. The amount reads 0 until the BOQ rate is filled.'}>
-                          {rateOf(b.ref) > 0 ? `₹${inr(rateOf(b.ref))}` : 'no rate'}
-                        </td>
-                        <td className="px-2 py-1.5" style={{ border: '1px solid var(--line)' }}>
-                          <input
-                            inputMode="decimal"
-                            value={v}
-                            onChange={(e) => setQ((s) => ({ ...s, [b.ref]: e.target.value }))}
-                            className="num w-[90px] rounded px-1.5 py-1 text-right text-[12.5px]"
-                            style={{
-                              border: `1px solid ${over ? 'var(--danger)' : 'var(--line)'}`,
-                              background: 'var(--panel)',
-                              color: over ? 'var(--danger)' : undefined,
-                            }}
-                          />
-                        </td>
-                        {/* Auto amount: indent qty times the BOQ rate. The live
-                            total above and the saved est value follow it. */}
-                        <td className="num px-2 py-1.5 text-right" style={{ border: '1px solid var(--line)' }}>
-                          {Number(v) > 0 ? inr(Number(v) * rateOf(b.ref)) : '—'}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <p className="mt-2 min-h-[16px] text-[12.5px]" style={{ color: err ? 'var(--danger)' : 'var(--muted)' }}>
-            {err || 'Quantities are checked against the BOQ balance, so you cannot indent more than was bid.'}
-          </p>
-
-          <div className="mt-2 flex justify-end gap-2">
-            <Button onClick={onClose}>Cancel</Button>
-            <Button variant="primary" disabled={busy} onClick={() => void save()}>
-              {busy ? 'Saving…' : 'Save indent'}
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>
   );
 }
 

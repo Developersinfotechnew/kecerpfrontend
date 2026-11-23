@@ -259,6 +259,9 @@ export default function ProjectPlannerPage(): React.JSX.Element {
         }
       }
       setSaveState('saved');
+      // Keep the "All changes saved" banner visible for 4 seconds so the user
+      // sees the confirmation before it fades back to idle.
+      setTimeout(() => { if (saveState === 'saved') setSaveState('idle'); }, 4000);
       // Keep the macro milestone register in step with the plan (client:
       // "schedule milestones reflect the L1 schedule"). Best-effort — a failed
       // sync never fails the plan save itself.

@@ -7,6 +7,7 @@ import { ImportExcelModal } from '@/components/ImportExcelModal';
 import { useRowApprovals } from '@/lib/row-approvals';
 import { ApprovalDetailsModal } from '@/components/ApprovalDetailsModal';
 import { Button, Chip, DataTable, Notice, PageHead, Panel, VitalsRail } from '@/components/ui';
+import { deriveBoqLine, lineRate, round2 } from '@/lib/boq-price';
 import { records } from '@/lib/services';
 import type { RecordRow, RecordType } from '@/lib/types';
 
@@ -82,7 +83,6 @@ export default function EpcBoqPage() {
 
     for (const r of rows) {
       const qty = Number(r.data.quantity) || 0;
-      const rate = Number(r.data.rate) || 0;
       const amount = Number(r.data.amount) || 0;
       const status = String(r.data.status ?? '');
       const orderedQty = Number(r.data.orderedQty) || 0;
@@ -96,8 +96,14 @@ export default function EpcBoqPage() {
       // Amount check (client log): qty × rate must equal the carried
       // amount. Rate is ₹, amount is ₹L, so the expected amount is
       // qty × rate ÷ 100000; a gap past ₹1000 flags the line.
-      if (amount > 0) {
-        const expected = (qty * rate) / 100_000;
+      //
+      // A line with no bid quantity has nothing to check against: the
+      // carried amount is the whole line, and the rate is derived from it
+      // (boq-price.ts), so qty × rate can only restate the amount. Such a
+      // line is not a mismatch — flagging it made every amount-only import
+      // read as broken.
+      if (amount > 0 && qty > 0) {
+        const expected = (qty * lineRate(r)) / 100_000;
         if (Math.abs(amount - expected) > 0.01) amountMismatch += 1;
       }
     }
@@ -224,21 +230,40 @@ export default function EpcBoqPage() {
                 ]
               : visible.map((r): React.ReactNode[] => {
                   const qty = Number(r.data.quantity) || 0;
-                  const rate = Number(r.data.rate) || 0;
+                  // The rate is derived when the row carries none (an
+                  // amount-only import), and a lump-sum line prices at its
+                  // whole amount for its single unit — so the column never
+                  // reads ₹0 for a line the register prices.
+                  const rate = lineRate(r);
                   const amount = Number(r.data.amount) || 0;
                   const orderedQty = Number(r.data.orderedQty) || 0;
                   const status = String(r.data.status ?? 'Pending approval');
                   // Expected amount in ₹L; a gap past ₹1000 marks the line.
+                  // No bid quantity means nothing to check against.
                   const expectedAmount = (qty * rate) / 100_000;
-                  const amountOff = amount > 0 && Math.abs(amount - expectedAmount) > 0.01;
+                  const amountOff = amount > 0 && qty > 0 && Math.abs(amount - expectedAmount) > 0.01;
                   return [
                     <span key="ref" className="num text-[12px]" style={{ color: 'var(--muted)' }}>
                       {r.ref}
                     </span>,
                     String(r.data.description ?? ''),
                     String(r.data.unit ?? ''),
-                    <span key="q" className="num">{qty.toLocaleString('en-IN')}</span>,
-                    <span key="r" className="num">{money(Number(r.data.rate) || 0)}</span>,
+                    <span key="q" className="num">{qty > 0 ? qty.toLocaleString('en-IN') : '—'}</span>,
+                    <span
+                      key="r"
+                      className="num"
+                      title={
+                        Number(r.data.rate) > 0
+                          ? undefined
+                          : qty > 0
+                            ? 'No rate typed: derived from the amount ÷ qty.'
+                            : amount > 0
+                              ? 'Lump sum: no BOQ qty, so the whole amount is the price of the line’s single unit. Add the BOQ qty to price per unit.'
+                              : 'No rate and no amount on this line.'
+                      }
+                    >
+                      {money(rate)}
+                    </span>,
                     <span key="a" className="num" title={amountOff ? `Expected ₹${expectedAmount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}L from qty × rate` : undefined} style={amountOff ? { color: 'var(--red)' } : undefined}>
                       {amountOff ? `${amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ⚠` : amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
                     </span>,
@@ -278,6 +303,12 @@ export default function EpcBoqPage() {
         <RecordForm
           type={type}
           record={editing}
+          // Objection 4: qty × rate fills the amount, and a qty typed on an
+          // amount-only line derives its rate — the price is never typed.
+          // Ordered qty / Vendor / PO reference are kept on this register
+          // screen: it is the BOQ management surface where later-stage
+          // values are tracked. The indent/PR desk hides them instead.
+          deriveFrom={deriveBoqLine}
           onCancel={() => setFormOpen(false)}
           onSubmit={async (body) => {
             if (editing) {
@@ -294,6 +325,17 @@ export default function EpcBoqPage() {
       {importOpen && type ? (
         <ImportExcelModal
           type={type}
+          // Objection 4, at the source: a sheet that carries Amount but no
+          // Rate imports a line whose money never calculates. Derive the rate
+          // from amount ÷ qty on the way in.
+          prepare={(data) => {
+            const qty = Number(data.quantity) || 0;
+            const amount = Number(data.amount) || 0;
+            if (qty > 0 && amount > 0 && !(Number(data.rate) > 0)) {
+              return { ...data, rate: String(round2((amount * 100_000) / qty)) };
+            }
+            return data;
+          }}
           create={async (data) => {
             await records.create(BOQ_KEY, { data });
           }}

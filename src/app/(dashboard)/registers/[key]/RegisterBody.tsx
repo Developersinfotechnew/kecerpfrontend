@@ -538,17 +538,26 @@ export default function RegisterBody() {
     setWbsMainTask('');
   }, [projectId]);
 
+  // Chain registers always show an Actions column, whether or not a chain is
+  // open on a given row; a non-chain register keeps its clean table. Declared
+  // before the columns memo: the memo reads it in its dependency array, and a
+  // `const` further down would be in its temporal dead zone at that point.
+  const isChainRegister = CHAIN_REGISTER_KEYS.has(key);
+
   const columns = useMemo(() => {
     if (!type) return [];
-    const listColumns = type.fields.filter((f) => f.listColumn);
+    const listColumns = type.fields.filter((f) => f.listColumn).sort((a, b) => a.sortOrder - b.sortOrder);
     // The approval row rule and the in-flight chip both live on the Status
-    // column, so never cut it: take the first seven, then always append the
-    // status field when a register had more than seven list columns.
-    let cols = listColumns.slice(0, 7);
+    // column, so never cut it: take the first N, then always append the
+    // status field. Chain registers also need the Actions column, so reserve
+    // one extra slot. Use 10 as a comfortable max that still leaves room for
+    // derived columns (variation value, DCI variance, WBS consumed).
+    const reserve = isChainRegister ? 2 : 1;
+    let cols = listColumns.slice(0, Math.max(1, 10 - reserve));
     const status = listColumns.find((f) => f.type === 'status');
     if (status && !cols.some((f) => f.key === status.key)) cols = [...cols, status];
     return cols.map((f) => ({ key: f.key, label: f.label, align: f.align, type: f.type }));
-  }, [type]);
+  }, [type, isChainRegister]);
 
   // Status columns read as chips, not raw words: the same colour language
   // every approval register uses, so an approved row reads green at a glance.
@@ -573,10 +582,6 @@ export default function RegisterBody() {
   }
 
   const titleField = type?.titleField ?? '';
-
-  // Chain registers always show an Actions column, whether or not a chain is
-  // open on a given row; a non-chain register keeps its clean table.
-  const isChainRegister = CHAIN_REGISTER_KEYS.has(key);
 
   // Registers whose chain opens on create (or is client-driven) never show
   // the manual Send button: DSR and DCI already start Requesting on create,
