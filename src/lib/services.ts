@@ -206,6 +206,10 @@ export interface ProcurementMis {
   boqBudget: number;
   poPlaced: number;
   savingVsBoq: number;
+  /** Site indents (boq_indents) raised against the approved BOQ. */
+  indentRaised: number;
+  indentAwaiting: number;
+  indentEstValueL: number;
 }
 
 export interface DciMis {

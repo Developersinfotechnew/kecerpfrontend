@@ -9,6 +9,8 @@ import { L } from '@/lib/project-data';
 import type { RecordRow, RecordType } from '@/lib/types';
 
 const PLAN_KEY = 'procurement_plan';
+/** The same register the indent desk and the purchase screen raise into. */
+const IND_KEY = 'boq_indents';
 
 const DAY_MS = 86_400_000;
 
@@ -36,17 +38,20 @@ export default function EpcProcurePlanPage() {
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<RecordRow | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [indents, setIndents] = useState<RecordRow[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [t, page] = await Promise.all([
+      const [t, page, ind] = await Promise.all([
         records.type(PLAN_KEY),
         records.list(PLAN_KEY, { limit: 500 }),
+        records.list(IND_KEY, { limit: 500 }).then((p) => p.items).catch(() => [] as RecordRow[]),
       ]);
       setType(t);
       setRows(page.items);
+      setIndents(ind);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load the procurement plan');
     } finally {
@@ -93,6 +98,19 @@ export default function EpcProcurePlanPage() {
     return { total: computed.length, open, overdue, openValue };
   }, [computed]);
 
+  // PR / Indent raised, straight from the boq_indents register (the same rows
+  // the indent desk and the purchase screen write). A planner sees on this
+  // screen what has already gone out against the plan, so a line that is
+  // overdue here but already raised over there is not chased twice. estValue
+  // is whole rupees (the dialog prices it live), shown in ₹L like the plan's
+  // own value column.
+  const indentStats = useMemo(() => {
+    const live = indents.filter((r) => String(r.data.status ?? '') !== 'Rejected');
+    const awaiting = live.filter((r) => ['Draft', 'Submitted'].includes(String(r.data.status ?? ''))).length;
+    const estValueL = Math.round(live.reduce((s, r) => s + (Number(r.data.estValue) || 0), 0) / 100_000);
+    return { total: live.length, awaiting, estValueL };
+  }, [indents]);
+
   const fmtDate = (ms: number | null) =>
     ms == null ? '—' : new Date(ms).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 
@@ -132,8 +150,52 @@ export default function EpcProcurePlanPage() {
             tone: stats.overdue > 0 ? ('bad' as const) : undefined,
           },
           { label: 'Open value', value: L(stats.openValue), note: 'Unissued POs, ₹L' },
+          {
+            label: 'PR / Indent raised',
+            value: String(indentStats.total),
+            note: `${indentStats.awaiting} awaiting · est ${L(indentStats.estValueL)}`,
+            tone: indentStats.awaiting > 0 ? ('warn' as const) : undefined,
+          },
         ]}
       />
+
+      <div className="mt-[18px]" />
+
+      <Panel
+        title="Raised PR / Indents"
+        sub="Live from the indent register — what has gone out against this plan"
+        bodyless
+      >
+        <DataTable
+          columns={[
+            { key: 'ref', label: 'PR / Indent' },
+            { key: 'site', label: 'Site' },
+            { key: 'need', label: 'Need by' },
+            { key: 'val', label: 'Est. value', align: 'right' },
+            { key: 'st', label: 'Status', align: 'right' },
+          ]}
+          rows={
+            indents.length === 0
+              ? [[<span key="e" style={{ color: 'var(--muted)' }}>None raised yet. Raise one on the indent desk or the purchase screen.</span>]]
+              : indents.map((r): React.ReactNode[] => {
+                  const d = r.data;
+                  const tone =
+                    String(d.status ?? '') === 'Rejected'
+                      ? ('bad' as const)
+                      : ['Draft', 'Submitted'].includes(String(d.status ?? ''))
+                        ? ('warn' as const)
+                        : ('ok' as const);
+                  return [
+                    <span key="ref" className="font-semibold">{String(d.prNo ?? r.ref)}</span>,
+                    <span key="site">{String(d.deliverySite ?? '—')}</span>,
+                    <span key="need" className="num">{d.needBy ? new Date(String(d.needBy)).toLocaleDateString('en-IN') : '—'}</span>,
+                    <span key="val" className="num">{L(Math.round((Number(d.estValue) || 0) / 100_000))}</span>,
+                    <Chip key="st" tone={tone}>{String(d.status ?? '—')}</Chip>,
+                  ];
+                })
+          }
+        />
+      </Panel>
 
       <div className="mt-[18px]" />
 

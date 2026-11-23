@@ -76,6 +76,7 @@ export default function ProcureMisPage() {
         <VitalsRail
           items={[
             { label: 'Open PRs', value: String(openPrTotal), tone: openPrTotal > 0 ? 'warn' : 'ok' },
+            { label: 'PR / Indent raised', value: String(mis.indentRaised), note: `${mis.indentAwaiting} awaiting · est ${L(mis.indentEstValueL)}`, tone: mis.indentAwaiting > 0 ? 'warn' : undefined },
             { label: 'RFQs awaiting', value: String(mis.rfqAwaitingOffers), tone: mis.rfqAwaitingOffers > 0 ? 'warn' : 'ok' },
             { label: 'POs pending approval', value: String(mis.poPendingApproval), tone: mis.poPendingApproval > 0 ? 'warn' : 'ok' },
             { label: 'Delayed items', value: String(mis.delayedItems), tone: mis.delayedItems > 0 ? 'bad' : 'ok', note: `Oldest ${mis.delayedOldestDays}d` },
