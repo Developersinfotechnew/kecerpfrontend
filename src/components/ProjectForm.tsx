@@ -235,6 +235,7 @@ export function ProjectForm({ onCancel, onSubmit }: ProjectFormProps) {
               <input
                 type="number"
                 min={0}
+                step="any"
                 value={capacityTpd}
                 onChange={(e) => setCapacityTpd(e.target.value)}
                 className="num w-full rounded px-2.5 py-1.5 text-[13px]"

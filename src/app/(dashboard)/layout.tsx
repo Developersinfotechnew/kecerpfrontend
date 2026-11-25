@@ -9,6 +9,7 @@ import { SUITE_LABELS } from '@/lib/types';
 import type { SuiteCatalogue } from '@/lib/types';
 import { projects as projectService, notifications as notificationsService } from '@/lib/services';
 import type { ProjectOption, NotificationItem } from '@/lib/services';
+import { setScopeName } from '@/lib/active-scope';
 
 /**
  * Dashboard shell.
@@ -86,6 +87,9 @@ export default function DashboardLayout({
           (rows.length === 1 ? rows[0].name : 'All projects');
         setScope(initial);
         window.localStorage.setItem(key, initial === 'All projects' ? '' : initial);
+        // Bring the shared store in line with the restored choice so the
+        // dashboard and planner open on the right project, not projects[0].
+        setScopeName(initial === 'All projects' ? null : initial);
       } catch {
         if (!cancelled) {
           setScopeProjects([]);
@@ -105,6 +109,10 @@ export default function DashboardLayout({
     if (user) {
       const key = `kec.scope.${user.email}`;
       window.localStorage.setItem(key, name === 'All projects' ? '' : name);
+      // Screens that resolve their own "current project" (the EPC dashboard,
+      // the project planner) subscribe to this store, so a switch re-points
+      // them live instead of leaving them on the previous project.
+      setScopeName(name === 'All projects' ? null : name);
     }
     // On a project page the sidebar pick and the URL are two views of the same
     // thing. The detail page keys off the URL id, so a dropdown choice must
@@ -184,6 +192,11 @@ export default function DashboardLayout({
     // sidebar pill is greyed so the client focuses on EPC + PMC + EPTP.
     // Remove this line to switch O&M back on.
     out.add('om');
+    // PMC is the one suite that never greys: a project onboarded without the
+    // pmc stage still runs the PMC dashboards (contract, handover,
+    // financials read the shared registers), so the pill stays clickable
+    // instead of hiding working screens.
+    out.delete('pmc');
     return out;
   }, [scope, scopeProjects]);
 

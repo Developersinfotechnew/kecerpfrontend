@@ -44,6 +44,14 @@ interface WizardDraft {
   enabledStages: string[];
 }
 
+/**
+ * Plant capacities the wizard offers as a fixed pick. Shared with the
+ * "Edit project" modal so both screens present the same list. A saved value
+ * outside the list (a hand-typed TPD from before the select existed) is
+ * still shown by the modal, never dropped.
+ */
+export const CAPACITY_TPD_OPTIONS = ['2.4', '3', '4.8', '7.2', '10', '12', '27'];
+
 const EMPTY: WizardDraft = {
   clientId: '',
   contractNo: '',
@@ -318,7 +326,7 @@ export function ProjectWizard({
                   <Field label="Capacity (TPD)">
                     <select className={inputCls} style={inputStyle} value={d.capacityTpd} onChange={(e) => set('capacityTpd', e.target.value)}>
                       <option value="">Select capacity…</option>
-                      {['2.4', '3', '4.8', '7.2', '10', '12', '27'].map((v) => (
+                      {CAPACITY_TPD_OPTIONS.map((v) => (
                         <option key={v} value={v}>{v} TPD</option>
                       ))}
                     </select>

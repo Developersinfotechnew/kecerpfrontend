@@ -7,7 +7,7 @@ import type { CreateProjectInput, ProjectOption } from '@/lib/services';
 import { useSession } from '../../session';
 import { Button, Chip, DataTable, Notice, PageHead, Panel } from '@/components/ui';
 import type { ChipTone } from '@/components/ui';
-import { ProjectWizard } from '@/components/ProjectWizard';
+import { ProjectWizard, CAPACITY_TPD_OPTIONS } from '@/components/ProjectWizard';
 import Link from 'next/link';
 
 /**
@@ -498,15 +498,21 @@ function EditProjectModal({
             />
           </FormField>
           <FormField label="Capacity (TPD)">
-            <input
-              type="number"
-              min="0"
+            <select
               value={capacityTpd}
               onChange={(e) => setCapacityTpd(e.target.value)}
               disabled={busy}
-              className={`${fieldInput} num`}
+              className={fieldInput}
               style={fieldStyle}
-            />
+            >
+              {CAPACITY_TPD_OPTIONS.map((v) => (
+                <option key={v} value={v}>{v} TPD</option>
+              ))}
+              {/* A value typed in before the select existed stays selectable, never dropped. */}
+              {capacityTpd && !CAPACITY_TPD_OPTIONS.includes(capacityTpd) ? (
+                <option value={capacityTpd}>{capacityTpd} TPD</option>
+              ) : null}
+            </select>
           </FormField>
           <FormField label="Contract value (₹L)">
             <input

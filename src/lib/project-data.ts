@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { projects as projectService } from './services';
 import type { ProjectOption } from './services';
+import { useScopeName } from './active-scope';
 
 /**
  * Project data access for the screens.
@@ -90,9 +91,23 @@ export function useProjectData(): ProjectData {
   // of memory. Referential stability per `rows` change is the fix.
   const projects = useMemo(() => rows.map(toView), [rows]);
 
+  // The top-bar switcher owns the "which project am I looking at" choice and
+  // persists it per signed-in user. Resolve `current` from that choice, so a
+  // screen that picks its own project follows the switcher instead of always
+  // snapping back to the first project in scope. No saved choice (or "All
+  // projects") falls back to the first one.
+  const scopeName = useScopeName();
+  const current = useMemo(
+    () =>
+      (scopeName ? projects.find((p) => p.name === scopeName) : null) ??
+      projects[0] ??
+      null,
+    [projects, scopeName],
+  );
+
   return {
     projects,
-    current: projects[0] ?? null,
+    current,
     loading,
     error,
     reload: load,

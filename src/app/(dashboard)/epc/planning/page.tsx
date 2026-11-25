@@ -11,6 +11,7 @@ import { parseXlsxSheets, XlsxParseError, XlsxCsvGrid } from '@/lib/xlsx-parse';
 import { openPrintReport } from '@/lib/print-report';
 import { projects, records } from '@/lib/services';
 import type { ProjectOption } from '@/lib/services';
+import { useScopeName } from '@/lib/active-scope';
 import { useSession } from '@/app/session';
 import type { RecordRow } from '@/lib/types';
 
@@ -138,18 +139,33 @@ export default function ProjectPlannerPage(): React.JSX.Element {
 
   // ── project list + saved plans (F9) ────────────────────────────────────
 
+  const scopeName = useScopeName();
   useEffect(() => {
     void (async () => {
       try {
         const list = await projects.list();
         setAllProjects(list);
-        if (list.length && !projectId) setProjectId(list[0].id);
+        // Follow the top-bar project choice: a plan saved under the active
+        // project must load when the screen opens. Before this it always
+        // snapped to the first in-scope project, so a project the user was
+        // working on showed its other projects' blank plans instead.
+        const active = scopeName ? list.find((p) => p.name === scopeName) : null;
+        if (list.length && !projectId) setProjectId((active ?? list[0]).id);
       } catch {
         // No projects yet: the planner still works unsaved.
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The switcher fires this while the planner is open: re-point at the chosen
+  // project so the plan under it loads, instead of keeping the old project's.
+  useEffect(() => {
+    if (!scopeName) return;
+    const match = allProjects.find((p) => p.name === scopeName);
+    if (match && match.id !== projectId) setProjectId(match.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeName]);
 
   useEffect(() => {
     if (!projectId) {
